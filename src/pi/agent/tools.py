@@ -8,15 +8,15 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable, Sequence
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import ClassVar
 
 from pydantic import (
     AliasChoices,
     BaseModel,
     ConfigDict,
     Field,
+    PrivateAttr,
     ValidationError,
-    field_validator,
     model_validator,
 )
 
@@ -25,17 +25,6 @@ from pi.agent.models import ToolCall
 MAX_TEXT_FILE_BYTES = 1_000_000
 MAX_BASH_OUTPUT_CHARS = 12_000
 DEFAULT_GLOB = "*"
-
-
-class ReadToolInput(BaseModel):
-    path: str = Field(min_length=1)
-    offset: int | None = Field(default=None, ge=1)
-    limit: int | None = Field(default=None, ge=1)
-
-
-class WriteToolInput(BaseModel):
-    path: str = Field(min_length=1)
-    content: str
 
 
 class ReplaceEdit(BaseModel):
@@ -50,74 +39,24 @@ class ReplaceEdit(BaseModel):
     )
 
 
-class EditToolInput(BaseModel):
-    path: str = Field(min_length=1)
-    old_text: str | None = Field(
-        default=None,
-        validation_alias=AliasChoices("oldText", "old_text"),
-        serialization_alias="oldText",
-    )
-    new_text: str | None = Field(
-        default=None,
-        validation_alias=AliasChoices("newText", "new_text"),
-        serialization_alias="newText",
-    )
-    edits: list[ReplaceEdit] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def validate_edit_mode(self) -> "EditToolInput":
-        single_mode = self.old_text is not None or self.new_text is not None
-        multi_mode = bool(self.edits)
-
-        if single_mode and multi_mode:
-            raise ValueError("Use either oldText/newText or edits, not both.")
-        if not single_mode and not multi_mode:
-            raise ValueError("Provide either oldText/newText or edits.")
-        if single_mode and (self.old_text is None or self.new_text is None):
-            raise ValueError("Single replacement mode requires both oldText and newText.")
-        return self
-
-    def normalized_edits(self) -> list[ReplaceEdit]:
-        if self.edits:
-            return self.edits
-        return [ReplaceEdit(oldText=self.old_text, newText=self.new_text)]
-
-
-class BashToolInput(BaseModel):
-    command: str = Field(min_length=1, max_length=4000)
-    timeout: int = Field(
-        default=30,
-        ge=1,
-        le=120,
-        validation_alias=AliasChoices("timeout", "timeout_seconds"),
-    )
-
-
-class LsToolInput(BaseModel):
-    path: str = Field(default=".", min_length=1)
-    recursive: bool = False
-    limit: int = Field(default=200, ge=1, le=1_000)
-
-
-class FindToolInput(BaseModel):
-    path: str = Field(default=".", min_length=1)
-    pattern: str = Field(min_length=1)
-    limit: int = Field(default=100, ge=1, le=1_000)
-
-
-class GrepToolInput(BaseModel):
-    path: str = Field(default=".", min_length=1)
-    pattern: str = Field(min_length=1)
-    glob: str = Field(default=DEFAULT_GLOB, min_length=1)
-    limit: int = Field(default=50, ge=1, le=500)
-
-
 class BaseTool(BaseModel, ABC):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    name: str
-    description: str
-    arguments_model: ClassVar[type[BaseModel]]
+    name: ClassVar[str]
+    description: ClassVar[str]
+    _context: dict[str, object] = PrivateAttr(default_factory=dict)
+
+    @classmethod
+    def bind(cls, **context: object) -> BaseTool:
+        tool = cls.model_construct()
+        tool._bind_context(**context)
+        return tool
+
+    def _bind_context(self, **context: object) -> None:
+        self._context = dict(context)
+
+    def _inherit_context(self, prototype: BaseTool) -> None:
+        self._bind_context(**prototype._context)
 
     def to_definition(self) -> dict[str, object]:
         return {
@@ -125,38 +64,45 @@ class BaseTool(BaseModel, ABC):
             "function": {
                 "name": self.name,
                 "description": self.description,
-                "parameters": self.arguments_model.model_json_schema(by_alias=True),
+                "parameters": self.__class__.model_json_schema(by_alias=True),
             },
         }
 
-    def parse_arguments(self, arguments: dict[str, object]) -> BaseModel:
-        return self.arguments_model.model_validate(arguments)
+    def parse_arguments(self, arguments: dict[str, object]) -> BaseTool:
+        parsed = self.__class__.model_validate(arguments)
+        parsed._inherit_context(self)
+        return parsed
 
     @abstractmethod
-    def execute(self, arguments: BaseModel) -> dict[str, object]:
+    def execute(self) -> dict[str, object]:
         raise NotImplementedError
 
 
 class WorkspaceTool(BaseTool, ABC):
-    root: Path
+    _root: Path = PrivateAttr()
 
-    @field_validator("root")
-    @classmethod
-    def validate_root(cls, root: Path) -> Path:
-        resolved = root.resolve()
-        if not resolved.exists() or not resolved.is_dir():
+    def _bind_context(self, **context: object) -> None:
+        root = context.get("root")
+        if root is None:
+            raise ValueError("Workspace root is required")
+
+        candidate = Path(root).resolve()
+        if not candidate.exists() or not candidate.is_dir():
             raise ValueError(f"Workspace root does not exist or is not a directory: {root}")
-        return resolved
+
+        self._context = {"root": candidate}
+        self._root = candidate
+
+    @property
+    def root(self) -> Path:
+        return self._root
 
     def _resolve_path(self, relative_path: str, *, allow_missing: bool = False) -> Path:
         if not relative_path.strip():
             raise ValueError("Path must be a non-empty relative path")
 
-        path = Path(relative_path)
-        if path.is_absolute():
-            raise ValueError("Path must be relative to the workspace root")
-
-        candidate = (self.root / path).resolve()
+        raw_path = Path(relative_path)
+        candidate = raw_path.resolve() if raw_path.is_absolute() else (self.root / raw_path).resolve()
         if not candidate.is_relative_to(self.root):
             raise ValueError(f"Path {relative_path!r} is outside the workspace root")
         if not allow_missing and not candidate.exists():
@@ -190,92 +136,122 @@ class WorkspaceTool(BaseTool, ABC):
 
 
 class ReadTool(WorkspaceTool):
-    arguments_model: ClassVar[type[BaseModel]] = ReadToolInput
-    name: str = "read"
-    description: str = (
+    name = "read"
+    description = (
         "Read a UTF-8 text file relative to the workspace root. "
         "Supports offset/limit for large files."
     )
 
-    def execute(self, arguments: BaseModel) -> dict[str, object]:
-        args = arguments if isinstance(arguments, ReadToolInput) else ReadToolInput.model_validate(arguments)
+    path: str = Field(min_length=1)
+    offset: int | None = Field(default=None, ge=1)
+    limit: int | None = Field(default=None, ge=1)
+
+    def execute(self) -> dict[str, object]:
         try:
-            path = self._resolve_path(args.path)
+            path = self._resolve_path(self.path)
             self._ensure_text_file(path)
             content = path.read_text(encoding="utf-8")
 
-            if args.offset is None and args.limit is None:
-                return self._success(path=args.path, content=content)
+            if self.offset is None and self.limit is None:
+                return self._success(path=self.path, content=content)
 
             lines = content.splitlines()
             if content.endswith("\n"):
                 lines.append("")
-            start = (args.offset or 1) - 1
+            start = (self.offset or 1) - 1
             if start >= len(lines):
-                raise ValueError(f"Offset {args.offset} is beyond end of file")
-            end = start + args.limit if args.limit is not None else len(lines)
+                raise ValueError(f"Offset {self.offset} is beyond end of file")
+            end = start + self.limit if self.limit is not None else len(lines)
             selected = lines[start:end]
             return self._success(
-                path=args.path,
+                path=self.path,
                 content="\n".join(selected),
-                offset=args.offset or 1,
-                limit=args.limit,
+                offset=self.offset or 1,
+                limit=self.limit,
                 next_offset=end + 1 if end < len(lines) else None,
             )
         except Exception as exc:
-            return self._error(str(exc), path=args.path)
+            return self._error(str(exc), path=self.path)
 
 
 class WriteTool(WorkspaceTool):
-    arguments_model: ClassVar[type[BaseModel]] = WriteToolInput
-    name: str = "write"
-    description: str = "Write a UTF-8 text file relative to the workspace root."
+    name = "write"
+    description = "Write a UTF-8 text file relative to the workspace root."
 
-    def execute(self, arguments: BaseModel) -> dict[str, object]:
-        args = (
-            arguments if isinstance(arguments, WriteToolInput) else WriteToolInput.model_validate(arguments)
-        )
+    path: str = Field(min_length=1)
+    content: str
+
+    def execute(self) -> dict[str, object]:
         try:
-            path = self._resolve_path(args.path, allow_missing=True)
-            encoded = args.content.encode("utf-8")
+            path = self._resolve_path(self.path, allow_missing=True)
+            encoded = self.content.encode("utf-8")
             if len(encoded) > MAX_TEXT_FILE_BYTES:
                 raise ValueError(
                     f"Content is too large to write safely (> {MAX_TEXT_FILE_BYTES} bytes)"
                 )
             if path.exists() and not path.is_file():
-                raise ValueError(f"Path is not a regular file: {args.path}")
+                raise ValueError(f"Path is not a regular file: {self.path}")
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(args.content, encoding="utf-8")
-            return self._success(path=args.path, bytes_written=len(encoded))
+            path.write_text(self.content, encoding="utf-8")
+            return self._success(path=self.path, bytes_written=len(encoded))
         except Exception as exc:
-            return self._error(str(exc), path=args.path)
+            return self._error(str(exc), path=self.path)
 
 
 class EditTool(WorkspaceTool):
-    arguments_model: ClassVar[type[BaseModel]] = EditToolInput
-    name: str = "edit"
-    description: str = (
+    name = "edit"
+    description = (
         "Replace exact text in a UTF-8 file. "
         "Use oldText/newText for one change or edits for multiple disjoint changes."
     )
 
-    def execute(self, arguments: BaseModel) -> dict[str, object]:
-        args = arguments if isinstance(arguments, EditToolInput) else EditToolInput.model_validate(arguments)
+    path: str = Field(min_length=1)
+    old_text: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("oldText", "old_text"),
+        serialization_alias="oldText",
+    )
+    new_text: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("newText", "new_text"),
+        serialization_alias="newText",
+    )
+    edits: list[ReplaceEdit] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_edit_mode(self) -> EditTool:
+        single_mode = self.old_text is not None or self.new_text is not None
+        multi_mode = bool(self.edits)
+
+        if single_mode and multi_mode:
+            raise ValueError("Use either oldText/newText or edits, not both.")
+        if not single_mode and not multi_mode:
+            raise ValueError("Provide either oldText/newText or edits.")
+        if single_mode and (self.old_text is None or self.new_text is None):
+            raise ValueError("Single replacement mode requires both oldText and newText.")
+        return self
+
+    def normalized_edits(self) -> list[ReplaceEdit]:
+        if self.edits:
+            return self.edits
+        return [ReplaceEdit(oldText=self.old_text, newText=self.new_text)]
+
+    def execute(self) -> dict[str, object]:
         try:
-            path = self._resolve_path(args.path)
+            path = self._resolve_path(self.path)
             self._ensure_text_file(path)
             original = path.read_text(encoding="utf-8")
 
             resolved_edits: list[tuple[int, int, str, str]] = []
-            for edit in args.normalized_edits():
+            for edit in self.normalized_edits():
                 start = original.find(edit.old_text)
                 if start == -1:
-                    return self._error(f"Text not found in {args.path}", path=args.path)
+                    return self._error(f"Text not found in {self.path}", path=self.path)
                 second_match = original.find(edit.old_text, start + 1)
                 if second_match != -1:
                     return self._error(
-                        f"Text to replace is not unique in {args.path}",
-                        path=args.path,
+                        f"Text to replace is not unique in {self.path}",
+                        path=self.path,
                     )
                 resolved_edits.append(
                     (start, start + len(edit.old_text), edit.old_text, edit.new_text)
@@ -285,98 +261,109 @@ class EditTool(WorkspaceTool):
             for current, following in zip(resolved_edits, resolved_edits[1:]):
                 if current[1] > following[0]:
                     return self._error(
-                        f"Edits overlap in {args.path}. Merge nearby changes into one edit.",
-                        path=args.path,
+                        f"Edits overlap in {self.path}. Merge nearby changes into one edit.",
+                        path=self.path,
                     )
 
             updated = original
             for start, end, old_text, new_text in reversed(resolved_edits):
                 if updated[start:end] != old_text:
                     return self._error(
-                        f"Edit no longer matches file content in {args.path}",
-                        path=args.path,
+                        f"Edit no longer matches file content in {self.path}",
+                        path=self.path,
                     )
                 updated = updated[:start] + new_text + updated[end:]
 
             path.write_text(updated, encoding="utf-8")
-            return self._success(path=args.path, edits_applied=len(resolved_edits))
+            return self._success(path=self.path, edits_applied=len(resolved_edits))
         except Exception as exc:
-            return self._error(str(exc), path=args.path)
+            return self._error(str(exc), path=self.path)
 
 
 class BashTool(WorkspaceTool):
-    arguments_model: ClassVar[type[BaseModel]] = BashToolInput
-    name: str = "bash"
-    description: str = "Run a shell command in the workspace root with a timeout."
+    name = "bash"
+    description = "Run a shell command in the workspace root."
 
-    def execute(self, arguments: BaseModel) -> dict[str, object]:
-        args = arguments if isinstance(arguments, BashToolInput) else BashToolInput.model_validate(arguments)
+    command: str = Field(min_length=1, max_length=4000)
+    timeout: int | None = Field(
+        default=None,
+        ge=1,
+        validation_alias=AliasChoices("timeout", "timeout_seconds"),
+    )
+
+    def execute(self) -> dict[str, object]:
         try:
-            completed = subprocess.run(
-                ["bash", "-c", args.command],
-                cwd=self.root,
-                capture_output=True,
-                text=True,
-                timeout=args.timeout,
-                check=False,
-                env={"PATH": os.environ.get("PATH", "")},
-            )
+            run_kwargs: dict[str, object] = {
+                "cwd": self.root,
+                "capture_output": True,
+                "text": True,
+                "check": False,
+                "env": {"PATH": os.environ.get("PATH", "")},
+            }
+            if self.timeout is not None:
+                run_kwargs["timeout"] = self.timeout
+
+            completed = subprocess.run(["bash", "-c", self.command], **run_kwargs)
             stdout, stdout_truncated = self._trim_output(completed.stdout)
             stderr, stderr_truncated = self._trim_output(completed.stderr)
             return {
                 "ok": completed.returncode == 0,
-                "command": args.command,
+                "command": self.command,
                 "returncode": completed.returncode,
                 "stdout": stdout,
                 "stderr": stderr,
                 "stdout_truncated": stdout_truncated,
                 "stderr_truncated": stderr_truncated,
-                "timeout": args.timeout,
+                "timeout": self.timeout,
             }
         except subprocess.TimeoutExpired as exc:
             stdout, stdout_truncated = self._trim_output(exc.stdout or "")
             stderr, stderr_truncated = self._trim_output(exc.stderr or "")
             return self._error(
-                f"Command timed out after {args.timeout} seconds",
-                command=args.command,
+                f"Command timed out after {self.timeout} seconds",
+                command=self.command,
                 stdout=stdout,
                 stderr=stderr,
                 stdout_truncated=stdout_truncated,
                 stderr_truncated=stderr_truncated,
-                timeout=args.timeout,
+                timeout=self.timeout,
             )
         except Exception as exc:
-            return self._error(str(exc), command=args.command, timeout=args.timeout)
+            return self._error(str(exc), command=self.command, timeout=self.timeout)
 
 
 class LsTool(WorkspaceTool):
-    arguments_model: ClassVar[type[BaseModel]] = LsToolInput
-    name: str = "ls"
-    description: str = "List files and directories under a workspace-relative path."
+    name = "ls"
+    description = "List files and directories under a workspace-relative path."
 
-    def execute(self, arguments: BaseModel) -> dict[str, object]:
-        args = arguments if isinstance(arguments, LsToolInput) else LsToolInput.model_validate(arguments)
+    path: str = Field(default=".", min_length=1)
+    recursive: bool = False
+    limit: int = Field(default=200, ge=1, le=1_000)
+
+    def execute(self) -> dict[str, object]:
         try:
-            path = self._resolve_path(args.path)
+            path = self._resolve_path(self.path)
             if path.is_file():
                 entries = [self._relative(path)]
             else:
-                iterator = path.rglob("*") if args.recursive else path.iterdir()
-                entries = sorted(self._relative(entry) for entry in iterator)[: args.limit]
-            return self._success(path=args.path, entries=entries, recursive=args.recursive)
+                iterator = path.rglob("*") if self.recursive else path.iterdir()
+                entries = sorted(self._relative(entry) for entry in iterator)[: self.limit]
+            return self._success(path=self.path, entries=entries, recursive=self.recursive)
         except Exception as exc:
-            return self._error(str(exc), path=args.path)
+            return self._error(str(exc), path=self.path)
 
 
 class FindTool(WorkspaceTool):
-    arguments_model: ClassVar[type[BaseModel]] = FindToolInput
-    name: str = "find"
-    description: str = "Find workspace files or directories whose relative path matches a glob."
+    name = "find"
+    description = "Find workspace files or directories whose relative path matches a glob."
 
-    def execute(self, arguments: BaseModel) -> dict[str, object]:
-        args = arguments if isinstance(arguments, FindToolInput) else FindToolInput.model_validate(arguments)
+    path: str = Field(default=".", min_length=1)
+    pattern: str = Field(min_length=1)
+    limit: int = Field(default=100, ge=1, le=1_000)
+
+    def execute(self) -> dict[str, object]:
         try:
-            path = self._resolve_path(args.path)
+            path = self._resolve_path(self.path)
             if path.is_file():
                 candidates = [path]
             else:
@@ -385,25 +372,28 @@ class FindTool(WorkspaceTool):
             matches: list[str] = []
             for candidate in candidates:
                 relative = self._relative(candidate)
-                if fnmatch(relative, args.pattern) or fnmatch(candidate.name, args.pattern):
+                if fnmatch(relative, self.pattern) or fnmatch(candidate.name, self.pattern):
                     matches.append(relative)
-                if len(matches) >= args.limit:
+                if len(matches) >= self.limit:
                     break
-            return self._success(path=args.path, pattern=args.pattern, matches=matches)
+            return self._success(path=self.path, pattern=self.pattern, matches=matches)
         except Exception as exc:
-            return self._error(str(exc), path=args.path, pattern=args.pattern)
+            return self._error(str(exc), path=self.path, pattern=self.pattern)
 
 
 class GrepTool(WorkspaceTool):
-    arguments_model: ClassVar[type[BaseModel]] = GrepToolInput
-    name: str = "grep"
-    description: str = "Search workspace text files with a regular expression."
+    name = "grep"
+    description = "Search workspace text files with a regular expression."
 
-    def execute(self, arguments: BaseModel) -> dict[str, object]:
-        args = arguments if isinstance(arguments, GrepToolInput) else GrepToolInput.model_validate(arguments)
+    path: str = Field(default=".", min_length=1)
+    pattern: str = Field(min_length=1)
+    glob: str = Field(default=DEFAULT_GLOB, min_length=1)
+    limit: int = Field(default=50, ge=1, le=500)
+
+    def execute(self) -> dict[str, object]:
         try:
-            root = self._resolve_path(args.path)
-            regex = re.compile(args.pattern)
+            root = self._resolve_path(self.path)
+            regex = re.compile(self.pattern)
             matches: list[dict[str, object]] = []
 
             candidates: Iterable[Path]
@@ -413,7 +403,7 @@ class GrepTool(WorkspaceTool):
                 candidates = (
                     candidate
                     for candidate in root.rglob("*")
-                    if candidate.is_file() and fnmatch(candidate.name, args.glob)
+                    if candidate.is_file() and fnmatch(candidate.name, self.glob)
                 )
 
             for candidate in candidates:
@@ -432,51 +422,51 @@ class GrepTool(WorkspaceTool):
                                 "text": line,
                             }
                         )
-                    if len(matches) >= args.limit:
+                    if len(matches) >= self.limit:
                         return self._success(
-                            path=args.path,
-                            pattern=args.pattern,
-                            glob=args.glob,
+                            path=self.path,
+                            pattern=self.pattern,
+                            glob=self.glob,
                             matches=matches,
                         )
 
             return self._success(
-                path=args.path,
-                pattern=args.pattern,
-                glob=args.glob,
+                path=self.path,
+                pattern=self.pattern,
+                glob=self.glob,
                 matches=matches,
             )
         except Exception as exc:
-            return self._error(str(exc), path=args.path, pattern=args.pattern, glob=args.glob)
+            return self._error(str(exc), path=self.path, pattern=self.pattern, glob=self.glob)
 
 
 def create_coding_tools(root: Path) -> list[BaseTool]:
     return [
-        ReadTool(root=root),
-        BashTool(root=root),
-        EditTool(root=root),
-        WriteTool(root=root),
+        ReadTool.bind(root=root),
+        BashTool.bind(root=root),
+        EditTool.bind(root=root),
+        WriteTool.bind(root=root),
     ]
 
 
 def create_read_only_tools(root: Path) -> list[BaseTool]:
     return [
-        ReadTool(root=root),
-        GrepTool(root=root),
-        FindTool(root=root),
-        LsTool(root=root),
+        ReadTool.bind(root=root),
+        GrepTool.bind(root=root),
+        FindTool.bind(root=root),
+        LsTool.bind(root=root),
     ]
 
 
 def create_all_tools(root: Path) -> list[BaseTool]:
     return [
-        ReadTool(root=root),
-        BashTool(root=root),
-        EditTool(root=root),
-        WriteTool(root=root),
-        GrepTool(root=root),
-        FindTool(root=root),
-        LsTool(root=root),
+        ReadTool.bind(root=root),
+        BashTool.bind(root=root),
+        EditTool.bind(root=root),
+        WriteTool.bind(root=root),
+        GrepTool.bind(root=root),
+        FindTool.bind(root=root),
+        LsTool.bind(root=root),
     ]
 
 
@@ -489,15 +479,15 @@ class ToolRegistry:
         self._tools = {tool.name: tool for tool in registered}
 
     @classmethod
-    def coding(cls, root: Path) -> "ToolRegistry":
+    def coding(cls, root: Path) -> ToolRegistry:
         return cls(root=root, tools=create_coding_tools(root))
 
     @classmethod
-    def read_only(cls, root: Path) -> "ToolRegistry":
+    def read_only(cls, root: Path) -> ToolRegistry:
         return cls(root=root, tools=create_read_only_tools(root))
 
     @classmethod
-    def all(cls, root: Path) -> "ToolRegistry":
+    def all(cls, root: Path) -> ToolRegistry:
         return cls(root=root, tools=create_all_tools(root))
 
     def definitions(self) -> list[dict[str, object]]:
@@ -514,8 +504,8 @@ class ToolRegistry:
             return {"ok": False, "error": f"Invalid tool arguments: {exc}"}
 
         try:
-            parsed = tool.parse_arguments(arguments)
+            invocation = tool.parse_arguments(arguments)
         except ValidationError as exc:
             return {"ok": False, "error": f"Invalid tool payload: {exc}"}
 
-        return tool.execute(parsed)
+        return invocation.execute()

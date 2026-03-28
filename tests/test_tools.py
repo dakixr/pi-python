@@ -51,7 +51,7 @@ def test_core_tools_round_trip(tmp_path: Path) -> None:
 def test_tools_are_registered_from_pydantic_tool_models(tmp_path: Path) -> None:
     registry = ToolRegistry(
         root=tmp_path,
-        tools=[ReadTool(root=tmp_path), EditTool(root=tmp_path)],
+        tools=[ReadTool.bind(root=tmp_path), EditTool.bind(root=tmp_path)],
     )
 
     definitions = {tool["function"]["name"]: tool["function"] for tool in registry.definitions()}
@@ -71,15 +71,15 @@ def test_tools_reject_paths_outside_root(tmp_path: Path) -> None:
     assert "outside" in result["error"]
 
 
-def test_tools_require_relative_paths(tmp_path: Path) -> None:
+def test_tools_allow_absolute_paths_within_root(tmp_path: Path) -> None:
     tools = ToolRegistry(root=tmp_path)
     path = tmp_path / "notes.txt"
     path.write_text("hello", encoding="utf-8")
 
     result = tools.execute(build_tool_call("read", {"path": str(path)}))
 
-    assert result["ok"] is False
-    assert "relative" in result["error"].lower()
+    assert result["ok"] is True
+    assert result["content"] == "hello"
 
 
 def test_bash_reports_timeout(tmp_path: Path) -> None:

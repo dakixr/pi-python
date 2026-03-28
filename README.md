@@ -14,7 +14,7 @@ The codebase stays deliberately small:
 The MVP is meant to be easy to extend without carrying framework weight too early:
 
 - provider logic is isolated behind a `Provider` protocol
-- tool schemas are generated from dedicated Pydantic input models attached to concrete tool classes
+- each concrete tool is its own Pydantic schema plus execution logic
 - the loop only knows about context preparation, providers, and tool execution
 - the CLI depends on the loop, not the other way around
 
@@ -65,7 +65,7 @@ The implementation is ready for real API keys, but the tests keep it fully mocke
 The runtime is now definition-first: each tool is a child `BaseModel` with:
 
 - stable metadata (`name`, `description`)
-- a dedicated child Pydantic schema for arguments
+- argument fields declared directly on the concrete tool class
 - local execution logic
 
 That makes registration simple and extensible without hard-coding schemas in the registry.
@@ -80,7 +80,7 @@ File operations are restricted to a configured workspace root and must use relat
 
 - `read(path, offset?, limit?)`
 - `edit(path, oldText/newText)` or `edit(path, edits=[...])`
-- `bash(command, timeout?)`
+- `bash(command, timeout?)` with no default timeout
 
 ## Context Engineering
 
@@ -89,9 +89,10 @@ The loop now uses a small `ContextManager` before the provider boundary:
 - initialize a run from prior messages plus the new prompt
 - inject the system prompt only when needed
 - optionally transform messages before the provider sees them
+- compact older provider-bound messages into a lossy summary while keeping recent work intact
 - append structured tool-result messages in one place
 
-This keeps the non-streaming loop small while leaving a clean seam for future pruning, summarization, or external context injection.
+Compaction is provider-side only: persisted session history stays intact, while oversized requests are summarized before they are sent upstream.
 
 ## Sessions
 
@@ -130,6 +131,8 @@ Run interactively:
 ```bash
 uv run pi
 ```
+
+In a TTY, the CLI keeps progress output minimal: a single live status label switches between `thinking` and `tool <name>` while a turn is running.
 
 Resume the same conversation later:
 
@@ -175,5 +178,4 @@ The tests cover:
 ## Next steps
 
 - add streaming without changing the context/tool abstractions
-- layer context pruning or summarization into `ContextManager`
 - support additional providers behind the same protocol

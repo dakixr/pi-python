@@ -162,6 +162,43 @@ def test_zai_provider_retries_transient_server_errors_with_backoff() -> None:
     assert sleeps == [1.0, 2.0]
 
 
+def test_zai_provider_retries_timeout_with_backoff() -> None:
+    attempts = 0
+    sleeps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise httpx.ReadTimeout("The read operation timed out", request=request)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "done",
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = ZAIProvider(
+        config=ZAIConfig(api_key="test-key", model="glm-5.1"),
+        http_client=client,
+        sleep=sleeps.append,
+    )
+
+    message = provider.complete(messages=[Message.user("hello")], tools=[])
+
+    assert message.content == "done"
+    assert attempts == 3
+    assert sleeps == [1.0, 2.0]
+
+
 def test_zai_provider_raises_clean_rate_limit_error_after_retries() -> None:
     attempts = 0
     sleeps: list[float] = []
@@ -182,6 +219,29 @@ def test_zai_provider_raises_clean_rate_limit_error_after_retries() -> None:
     )
 
     with pytest.raises(ProviderRateLimitError, match="Rate limit exceeded"):
+        provider.complete(messages=[Message.user("hello")], tools=[])
+
+    assert attempts == 3
+    assert sleeps == [1.0, 2.0]
+
+
+def test_zai_provider_raises_clean_timeout_error_after_retries() -> None:
+    attempts = 0
+    sleeps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        raise httpx.ReadTimeout("The read operation timed out", request=request)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = ZAIProvider(
+        config=ZAIConfig(api_key="test-key", model="glm-5.1"),
+        http_client=client,
+        sleep=sleeps.append,
+    )
+
+    with pytest.raises(ProviderError, match="timed out after 3 attempts"):
         provider.complete(messages=[Message.user("hello")], tools=[])
 
     assert attempts == 3

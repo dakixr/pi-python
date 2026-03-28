@@ -22,7 +22,7 @@ class ZAIConfig(BaseModel):
     api_key: str
     model: str = "glm-5.1"
     base_url: str = "https://api.z.ai/api/coding/paas/v4"
-    timeout_seconds: float = 60.0
+    timeout_seconds: float | None = None
     max_retries: int = 2
     retry_backoff_seconds: float = 1.0
     max_retry_backoff_seconds: float = 8.0
@@ -81,6 +81,19 @@ class ZAIProvider(Provider):
                     f"{self.config.base_url.rstrip('/')}/chat/completions",
                     json=payload,
                 )
+            except httpx.TimeoutException as exc:
+                last_error = ProviderError(
+                    (
+                        "ZAI request timed out after "
+                        f"{attempt + 1} attempts."
+                        if attempt == self.config.max_retries
+                        else "ZAI request timed out."
+                    )
+                )
+                if attempt < self.config.max_retries:
+                    self._sleep(self._backoff_seconds(attempt))
+                    continue
+                raise last_error from exc
             except httpx.RequestError as exc:
                 raise ProviderError(f"ZAI request failed: {exc}") from exc
 

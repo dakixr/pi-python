@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from pi.agent.context import ContextManager
@@ -17,6 +18,9 @@ class AgentResult:
 
 class MaxIterationsExceededError(RuntimeError):
     pass
+
+
+AgentEventHandler = Callable[[str, dict[str, object]], None]
 
 
 class Agent:
@@ -38,10 +42,14 @@ class Agent:
         self,
         prompt: str,
         messages: list[Message] | None = None,
+        *,
+        on_event: AgentEventHandler | None = None,
     ) -> AgentResult:
         context = self.context_manager.initialize(prompt, messages)
 
         for iteration in range(1, self.max_iterations + 1):
+            if on_event is not None:
+                on_event("model_start", {"iteration": iteration})
             assistant_message = self.provider.complete(
                 self.context_manager.messages_for_provider(context),
                 self.tools.definitions(),
@@ -56,7 +64,26 @@ class Agent:
                 )
 
             for tool_call in assistant_message.tool_calls:
+                if on_event is not None:
+                    on_event(
+                        "tool_start",
+                        {
+                            "iteration": iteration,
+                            "tool_name": tool_call.function.name,
+                            "tool_arguments": tool_call.function.arguments,
+                        },
+                    )
                 result = self.tools.execute(tool_call)
+                if on_event is not None:
+                    on_event(
+                        "tool_end",
+                        {
+                            "iteration": iteration,
+                            "tool_name": tool_call.function.name,
+                            "ok": result.get("ok", False),
+                            "result": result,
+                        },
+                    )
                 self.context_manager.append_tool_result(
                     context,
                     tool_call_id=tool_call.id,

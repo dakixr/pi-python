@@ -112,3 +112,33 @@ def test_agent_loop_uses_context_manager_before_provider_boundary(tmp_path: Path
     result = agent.run("hello")
 
     assert result.output == "done"
+
+
+def test_agent_loop_emits_progress_events(tmp_path: Path) -> None:
+    events: list[tuple[str, dict[str, object]]] = []
+    agent = Agent(provider=FakeProvider(), tools=ToolRegistry(root=tmp_path))
+
+    result = agent.run("Create a file", on_event=lambda event, payload: events.append((event, payload)))
+
+    assert result.output == "done"
+    assert events == [
+        ("model_start", {"iteration": 1}),
+        (
+            "tool_start",
+            {
+                "iteration": 1,
+                "tool_name": "write",
+                "tool_arguments": '{"path":"hello.txt","content":"hello"}',
+            },
+        ),
+        (
+            "tool_end",
+            {
+                "iteration": 1,
+                "tool_name": "write",
+                "ok": True,
+                "result": {"ok": True, "path": "hello.txt", "bytes_written": 5},
+            },
+        ),
+        ("model_start", {"iteration": 2}),
+    ]
