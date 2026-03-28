@@ -32,26 +32,34 @@ class Agent:
         self.system_prompt = system_prompt
         self.max_iterations = max_iterations
 
-    def run(self, prompt: str) -> AgentResult:
-        messages: list[Message] = []
-        if self.system_prompt:
-            messages.append(Message.system(self.system_prompt))
-        messages.append(Message.user(prompt))
+    def run(
+        self,
+        prompt: str,
+        messages: list[Message] | None = None,
+    ) -> AgentResult:
+        conversation = [message.model_copy(deep=True) for message in messages or []]
+        if self.system_prompt and not any(
+            message.role == "system" for message in conversation
+        ):
+            conversation.insert(0, Message.system(self.system_prompt))
+        conversation.append(Message.user(prompt))
 
         for iteration in range(1, self.max_iterations + 1):
-            assistant_message = self.provider.complete(messages, self.tools.definitions())
-            messages.append(assistant_message)
+            assistant_message = self.provider.complete(
+                conversation, self.tools.definitions()
+            )
+            conversation.append(assistant_message)
 
             if not assistant_message.tool_calls:
                 return AgentResult(
                     output=assistant_message.content or "",
-                    messages=messages,
+                    messages=conversation,
                     iterations=iteration,
                 )
 
             for tool_call in assistant_message.tool_calls:
                 result = self.tools.execute(tool_call)
-                messages.append(
+                conversation.append(
                     Message.tool(
                         tool_call_id=tool_call.id,
                         content=json.dumps(result, ensure_ascii=False),
