@@ -13,12 +13,15 @@ dependencies = [
 ]
 
 [project.scripts]
-pi-python = "pi_python.cli.main:main"
+pi = "pi.cli.main:main"
 
 [tool.uv]
 dev-dependencies = [
     "pytest>=8.3",
 ]
+
+[tool.uv.build-backend]
+module-name = "pi"
 
 [tool.pytest.ini_options]
 addopts = "-q"

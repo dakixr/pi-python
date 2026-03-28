@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pi_python.agent.loop import Agent
-from pi_python.agent.models import Message, ToolCall, ToolFunction
-from pi_python.agent.providers.base import Provider
-from pi_python.agent.tools import ToolRegistry
+from pi.agent.context import ContextManager
+from pi.agent.loop import Agent
+from pi.agent.models import Message, ToolCall, ToolFunction
+from pi.agent.providers.base import Provider
+from pi.agent.tools import ToolRegistry
 
 
 class FakeProvider(Provider):
@@ -84,3 +85,30 @@ def test_agent_loop_can_continue_existing_history(tmp_path: Path) -> None:
         "user",
         "assistant",
     ]
+
+
+class TransformProvider(Provider):
+    def complete(self, messages: list[Message], tools: list[dict[str, object]]) -> Message:
+        assert [message.role for message in messages] == ["system", "user"]
+        assert messages[0].content == "transformed system"
+        return Message.assistant("done")
+
+
+def test_agent_loop_uses_context_manager_before_provider_boundary(tmp_path: Path) -> None:
+    def transform(messages: list[Message]) -> list[Message]:
+        updated = [message.model_copy(deep=True) for message in messages]
+        updated[0] = Message.system("transformed system")
+        return updated
+
+    agent = Agent(
+        provider=TransformProvider(),
+        tools=ToolRegistry(root=tmp_path),
+        context_manager=ContextManager(
+            system_prompt="original system",
+            transform_messages=transform,
+        ),
+    )
+
+    result = agent.run("hello")
+
+    assert result.output == "done"

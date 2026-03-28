@@ -5,9 +5,9 @@ import json
 import httpx
 import pytest
 
-from pi_python.agent.models import Message
-from pi_python.agent.providers.base import ProviderError, ProviderRateLimitError
-from pi_python.agent.providers.zai import ZAIConfig, ZAIProvider
+from pi.agent.models import Message
+from pi.agent.providers.base import ProviderError, ProviderRateLimitError
+from pi.agent.providers.zai import ZAIConfig, ZAIProvider
 
 
 def test_zai_provider_posts_openai_style_chat_request() -> None:

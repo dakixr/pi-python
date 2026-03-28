@@ -1,21 +1,21 @@
 # pi-python
 
-`pi-python` is a minimal Python implementation inspired by `pi`: a small agent runtime plus a CLI wrapper around it.
+`pi-python` is the Python package and distribution name. Internally, the runtime, module path, and CLI are all `pi`.
 
 The current implementation stays intentionally non-streaming. Each turn runs to completion, returns one assistant response, and optionally persists the full conversation locally for later reuse.
 
 The codebase stays deliberately small:
 
-- `pi_python.agent`: message models, provider abstraction, core tools, and the agent loop
-- `pi_python.cli`: argument parsing, session persistence, and an interactive or one-shot CLI
+- `pi.agent`: message models, provider abstraction, context management, tool definitions, and the agent loop
+- `pi.cli`: argument parsing, session persistence, and an interactive or one-shot CLI
 
 ## Why this shape
 
 The MVP is meant to be easy to extend without carrying framework weight too early:
 
 - provider logic is isolated behind a `Provider` protocol
-- tool schemas are generated from typed argument models
-- the loop only knows about messages, providers, and tool execution
+- tool schemas are generated from dedicated Pydantic input models attached to concrete tool classes
+- the loop only knows about context preparation, providers, and tool execution
 - the CLI depends on the loop, not the other way around
 
 ## Project layout
@@ -24,11 +24,12 @@ The MVP is meant to be easy to extend without carrying framework weight too earl
 pi-python/
 ├── pyproject.toml
 ├── README.md
-├── src/pi_python/
+├── src/pi/
 │   ├── __init__.py
 │   ├── __main__.py
 │   ├── agent/
 │   │   ├── __init__.py
+│   │   ├── context.py
 │   │   ├── loop.py
 │   │   ├── models.py
 │   │   ├── tools.py
@@ -61,21 +62,43 @@ The implementation is ready for real API keys, but the tests keep it fully mocke
 
 ## Tools
 
-The built-in tool registry currently exposes four minimal tools:
+The runtime is now definition-first: each tool is a child `BaseModel` with:
 
-- `read`
-- `write`
-- `edit`
-- `bash`
+- stable metadata (`name`, `description`)
+- a dedicated child Pydantic schema for arguments
+- local execution logic
 
-File operations are restricted to a configured workspace root and must use relative paths. The runtime also rejects oversized text payloads, caps captured shell output, and returns clearer timeout/error payloads from tools.
+That makes registration simple and extensible without hard-coding schemas in the registry.
+
+The built-in tool factories mirror the TypeScript reference structure:
+
+- coding tools: `read`, `bash`, `edit`, `write`
+- read-only tools: `read`, `grep`, `find`, `ls`
+- all tools: both sets combined
+
+File operations are restricted to a configured workspace root and must use relative paths. The runtime also rejects oversized text payloads, caps captured shell output, and supports richer schemas such as:
+
+- `read(path, offset?, limit?)`
+- `edit(path, oldText/newText)` or `edit(path, edits=[...])`
+- `bash(command, timeout?)`
+
+## Context Engineering
+
+The loop now uses a small `ContextManager` before the provider boundary:
+
+- initialize a run from prior messages plus the new prompt
+- inject the system prompt only when needed
+- optionally transform messages before the provider sees them
+- append structured tool-result messages in one place
+
+This keeps the non-streaming loop small while leaving a clean seam for future pruning, summarization, or external context injection.
 
 ## Sessions
 
 Use `--session <name>` to load and persist conversation state across separate CLI invocations. Sessions are stored as JSON in:
 
 ```text
-<workspace-root>/.pi-python/sessions/<name>.json
+<workspace-root>/.pi/sessions/<name>.json
 ```
 
 That state includes the full message history used by the agent loop, so a later run can continue the prior conversation without streaming or an external database.
@@ -91,7 +114,7 @@ export ZAI_API_KEY=your-api-key
 Run one prompt:
 
 ```bash
-uv run pi-python --prompt "Create a hello world file in this workspace"
+uv run pi --prompt "Create a hello world file in this workspace"
 ```
 
 If the provider returns a retryable API error and the retries are exhausted, the CLI prints a short error to stderr and exits with code `1`.
@@ -99,25 +122,25 @@ If the provider returns a retryable API error and the retries are exhausted, the
 Run one prompt and persist the conversation under a named session:
 
 ```bash
-uv run pi-python --session demo --prompt "Create a hello world file in this workspace"
+uv run pi --session demo --prompt "Create a hello world file in this workspace"
 ```
 
 Run interactively:
 
 ```bash
-uv run pi-python
+uv run pi
 ```
 
 Resume the same conversation later:
 
 ```bash
-uv run pi-python --session demo
+uv run pi --session demo
 ```
 
 Point tools at a specific workspace root:
 
 ```bash
-uv run pi-python --root /path/to/workspace --prompt "Read README.md"
+uv run pi --root /path/to/workspace --prompt "Read README.md"
 ```
 
 ## Development
@@ -139,8 +162,8 @@ uv run pytest
 The tests cover:
 
 - ZAI response parsing and request payload shape
-- core tool execution, renamed tool definitions, and workspace boundary checks
-- the agent loop from tool call to final assistant output, including continued history
+- tool execution, workspace boundary checks, and Pydantic-backed tool registration
+- the agent loop from tool call to final assistant output, including context transforms
 - one-shot CLI execution plus named session persistence
 
 ## Assumptions
@@ -151,6 +174,6 @@ The tests cover:
 
 ## Next steps
 
-- add richer edit primitives
-- make bash controls more policy-driven if stricter environments are needed
+- add streaming without changing the context/tool abstractions
+- layer context pruning or summarization into `ContextManager`
 - support additional providers behind the same protocol

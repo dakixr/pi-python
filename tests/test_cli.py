@@ -5,10 +5,10 @@ from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
 
-from pi_python.agent.loop import AgentResult
-from pi_python.agent.models import Message
-from pi_python.agent.providers.base import ProviderError
-from pi_python.cli.main import build_parser, run_cli
+from pi.agent.loop import AgentResult
+from pi.agent.models import Message
+from pi.agent.providers.base import ProviderError
+from pi.cli.main import build_parser, run_cli
 
 
 @dataclass
@@ -61,7 +61,7 @@ def test_cli_persists_and_reuses_named_session(tmp_path: Path, capsys) -> None:
     assert second_output == "second response"
     assert agent.seen_history_lengths == [0, 2]
 
-    session_path = tmp_path / ".pi-python" / "sessions" / "demo.json"
+    session_path = tmp_path / ".pi" / "sessions" / "demo.json"
     payload = json.loads(session_path.read_text(encoding="utf-8"))
     assert payload["id"] == "demo"
     assert [message["role"] for message in payload["messages"]] == [

@@ -9,8 +9,8 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, Field, ValidationError
 
-from pi_python.agent.models import Message, ToolCall
-from pi_python.agent.providers.base import (
+from pi.agent.models import Message, ToolCall
+from pi.agent.providers.base import (
     Provider,
     ProviderError,
     ProviderRateLimitError,

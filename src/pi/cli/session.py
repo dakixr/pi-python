@@ -6,7 +6,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field, ValidationError
 
-from pi_python.agent.models import Message
+from pi.agent.models import Message
 
 SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
@@ -19,7 +19,7 @@ class SessionRecord(BaseModel):
 class SessionStore:
     def __init__(self, root: Path) -> None:
         self.root = root.resolve()
-        self.directory = self.root / ".pi-python" / "sessions"
+        self.directory = self.root / ".pi" / "sessions"
 
     def load(self, session_id: str) -> SessionRecord:
         path = self._path_for(session_id)

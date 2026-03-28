@@ -5,8 +5,8 @@ import shlex
 import sys
 from pathlib import Path
 
-from pi_python.agent.models import ToolCall, ToolFunction
-from pi_python.agent.tools import ToolRegistry
+from pi.agent.models import ToolCall, ToolFunction
+from pi.agent.tools import EditTool, ReadTool, ToolRegistry
 
 
 def build_tool_call(name: str, arguments: dict[str, object]) -> ToolCall:
@@ -21,9 +21,9 @@ def test_core_tools_round_trip(tmp_path: Path) -> None:
 
     assert [tool["function"]["name"] for tool in tools.definitions()] == [
         "read",
-        "write",
-        "edit",
         "bash",
+        "edit",
+        "write",
     ]
 
     write_result = tools.execute(
@@ -46,6 +46,20 @@ def test_core_tools_round_trip(tmp_path: Path) -> None:
     bash_result = tools.execute(build_tool_call("bash", {"command": "cat notes.txt"}))
     assert bash_result["ok"] is True
     assert bash_result["stdout"] == "beta"
+
+
+def test_tools_are_registered_from_pydantic_tool_models(tmp_path: Path) -> None:
+    registry = ToolRegistry(
+        root=tmp_path,
+        tools=[ReadTool(root=tmp_path), EditTool(root=tmp_path)],
+    )
+
+    definitions = {tool["function"]["name"]: tool["function"] for tool in registry.definitions()}
+
+    assert sorted(definitions) == ["edit", "read"]
+    assert "offset" in definitions["read"]["parameters"]["properties"]
+    assert "oldText" in definitions["edit"]["parameters"]["properties"]
+    assert "old_text" not in definitions["edit"]["parameters"]["properties"]
 
 
 def test_tools_reject_paths_outside_root(tmp_path: Path) -> None:

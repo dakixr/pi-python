@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from pi_python.agent.models import Message
+from pi.agent.models import Message
 
 
 class ProviderError(RuntimeError):

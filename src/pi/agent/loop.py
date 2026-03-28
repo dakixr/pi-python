@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 
-from pi_python.agent.models import Message
-from pi_python.agent.providers.base import Provider
-from pi_python.agent.tools import ToolRegistry
+from pi.agent.context import ContextManager
+from pi.agent.models import Message
+from pi.agent.providers.base import Provider
+from pi.agent.tools import ToolRegistry
 
 
 @dataclass(slots=True)
@@ -26,44 +26,41 @@ class Agent:
         tools: ToolRegistry,
         system_prompt: str | None = None,
         max_iterations: int = 8,
+        context_manager: ContextManager | None = None,
     ) -> None:
         self.provider = provider
         self.tools = tools
         self.system_prompt = system_prompt
         self.max_iterations = max_iterations
+        self.context_manager = context_manager or ContextManager(system_prompt=system_prompt)
 
     def run(
         self,
         prompt: str,
         messages: list[Message] | None = None,
     ) -> AgentResult:
-        conversation = [message.model_copy(deep=True) for message in messages or []]
-        if self.system_prompt and not any(
-            message.role == "system" for message in conversation
-        ):
-            conversation.insert(0, Message.system(self.system_prompt))
-        conversation.append(Message.user(prompt))
+        context = self.context_manager.initialize(prompt, messages)
 
         for iteration in range(1, self.max_iterations + 1):
             assistant_message = self.provider.complete(
-                conversation, self.tools.definitions()
+                self.context_manager.messages_for_provider(context),
+                self.tools.definitions(),
             )
-            conversation.append(assistant_message)
+            self.context_manager.append_message(context, assistant_message)
 
             if not assistant_message.tool_calls:
                 return AgentResult(
                     output=assistant_message.content or "",
-                    messages=conversation,
+                    messages=context.messages,
                     iterations=iteration,
                 )
 
             for tool_call in assistant_message.tool_calls:
                 result = self.tools.execute(tool_call)
-                conversation.append(
-                    Message.tool(
-                        tool_call_id=tool_call.id,
-                        content=json.dumps(result, ensure_ascii=False),
-                    )
+                self.context_manager.append_tool_result(
+                    context,
+                    tool_call_id=tool_call.id,
+                    result=result,
                 )
 
         raise MaxIterationsExceededError(

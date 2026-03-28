@@ -5,24 +5,24 @@ import os
 import sys
 from pathlib import Path
 
-from pi_python.agent.loop import Agent
-from pi_python.agent.providers.base import ProviderError
-from pi_python.agent.providers.zai import ZAIConfig, ZAIProvider
-from pi_python.agent.tools import ToolRegistry
-from pi_python.cli.session import SessionStore
+from pi.agent.loop import Agent
+from pi.agent.providers.base import ProviderError
+from pi.agent.providers.zai import ZAIConfig, ZAIProvider
+from pi.agent.tools import ToolRegistry
+from pi.cli.session import SessionStore
 
 DEFAULT_SYSTEM_PROMPT = (
-    "You are pi-python, a minimal coding agent. "
+    "You are pi, a minimal coding agent. "
     "Use tools when needed and finish with a direct assistant answer."
 )
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="pi-python")
+    parser = argparse.ArgumentParser(prog="pi")
     parser.add_argument("--prompt", help="Run one prompt and exit.")
     parser.add_argument(
         "--session",
-        help="Load and persist conversation state under .pi-python/sessions/<name>.json.",
+        help="Load and persist conversation state under .pi/sessions/<name>.json.",
     )
     parser.add_argument("--api-key", default=os.getenv("ZAI_API_KEY", ""))
     parser.add_argument("--model", default="glm-5.1")
