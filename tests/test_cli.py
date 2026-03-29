@@ -214,11 +214,53 @@ def test_interactive_renderer_prints_user_separator_as_own_block() -> None:
 
     with InteractiveRenderer(stream) as renderer:
         renderer.set_input_buffer("queued")
-        renderer.print_message("user:\ncheck how this works\n---")
+        renderer.print_message("---\nuser:\ncheck how this works\n---")
 
         rendered = stream.getvalue()
 
-    assert "user:\ncheck how this works\n---\n" in rendered
+    assert "---\nuser:\ncheck how this works\n---\n" in rendered
+
+
+def test_interactive_renderer_does_not_truncate_user_separator_message() -> None:
+    stream = FakeTTY()
+    long_prompt = "x" * 120
+
+    with InteractiveRenderer(stream) as renderer:
+        renderer.print_message(f"---\nuser:\n{long_prompt}\n---")
+
+        rendered = stream.getvalue()
+
+    assert f"---\nuser:\n{long_prompt}\n---\n" in rendered
+
+
+def test_interactive_renderer_clears_last_tool_line_before_final_output() -> None:
+    stream = FakeTTY()
+
+    with InteractiveRenderer(stream) as renderer:
+        renderer.handle_event("model_start", {"iteration": 1})
+        renderer.handle_event(
+            "tool_start",
+            {
+                "iteration": 1,
+                "tool_name": "read",
+                "tool_arguments": '{"path":"README.md"}',
+            },
+        )
+        renderer.handle_event(
+            "tool_end",
+            {
+                "iteration": 1,
+                "tool_name": "read",
+                "ok": True,
+                "result": {"ok": True, "path": "README.md", "content": "hello"},
+            },
+        )
+        renderer.clear_turn_state()
+        renderer.print_message("done")
+
+        rendered = stream.getvalue()
+
+    assert rendered.rfind("tool read README.md") < rendered.rfind("done")
 
 
 def test_interactive_renderer_collapses_queue_preview_to_one_line() -> None:
@@ -338,7 +380,17 @@ def test_interactive_cli_continues_after_turn_error(capsys) -> None:
     captured = capsys.readouterr()
 
     assert exit_code == 0
-    assert captured.out.splitlines() == ["user:", "second task", "---", "done"]
+    assert captured.out.splitlines() == [
+        "---",
+        "user:",
+        "first task",
+        "---",
+        "---",
+        "user:",
+        "second task",
+        "---",
+        "done",
+    ]
     assert captured.err.strip() == "Error: Agent exceeded max_iterations=20"
 
 
@@ -408,7 +460,12 @@ def test_interactive_cli_queues_messages_while_turn_is_running(capsys) -> None:
     assert "queued second task" in stderr.getvalue()
     assert agent.calls == [("first task", 0), ("second task", 2)]
     assert captured.out.splitlines() == [
+        "---",
+        "user:",
+        "first task",
+        "---",
         "done first task",
+        "---",
         "user:",
         "second task",
         "---",
@@ -480,7 +537,7 @@ def test_interactive_cli_drops_queued_messages_after_turn_error(capsys) -> None:
     captured = capsys.readouterr()
 
     assert result["exit_code"] == 0
-    assert captured.out == ""
+    assert captured.out.splitlines() == ["---", "user:", "first task", "---"]
     assert agent.calls == ["first task"]
     assert "queued second task" in stderr.getvalue()
     assert "Dropped 1 queued message after turn error." in stderr.getvalue()
