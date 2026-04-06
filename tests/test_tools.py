@@ -30,6 +30,8 @@ def test_core_tools_round_trip(tmp_path: Path) -> None:
         build_tool_call("write", {"path": "notes.txt", "content": "alpha"})
     )
     assert write_result["ok"] is True
+    assert write_result["created"] is True
+    assert write_result["diff"] == "--- /dev/null\n+++ b/notes.txt\n@@ -0,0 +1 @@\n+alpha"
 
     edit_result = tools.execute(
         build_tool_call(
@@ -38,6 +40,7 @@ def test_core_tools_round_trip(tmp_path: Path) -> None:
         )
     )
     assert edit_result["ok"] is True
+    assert edit_result["diff"] == "--- a/notes.txt\n+++ b/notes.txt\n@@ -1 +1 @@\n-alpha\n+beta"
     assert (tmp_path / "notes.txt").read_text() == "beta"
 
     read_result = tools.execute(build_tool_call("read", {"path": "notes.txt"}))

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from difflib import unified_diff
 import json
 import os
 import re
@@ -24,6 +25,7 @@ from pi.agent.models import ToolCall
 
 MAX_TEXT_FILE_BYTES = 1_000_000
 MAX_BASH_OUTPUT_CHARS = 12_000
+MAX_DIFF_OUTPUT_CHARS = 8_000
 DEFAULT_GLOB = "*"
 
 
@@ -134,6 +136,46 @@ class WorkspaceTool(BaseTool, ABC):
     def _relative(self, path: Path) -> str:
         return str(path.relative_to(self.root))
 
+    def _read_existing_text(self, path: Path) -> str | None:
+        if not path.exists() or not path.is_file():
+            return None
+        if path.stat().st_size > MAX_TEXT_FILE_BYTES:
+            return None
+        try:
+            return path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return None
+
+
+def build_unified_diff(
+    path: str,
+    before: str,
+    after: str,
+    *,
+    created: bool = False,
+) -> tuple[str | None, bool]:
+    before_lines = [] if created else before.splitlines()
+    after_lines = after.splitlines()
+    fromfile = "/dev/null" if created else f"a/{path}"
+    tofile = f"b/{path}"
+    diff_lines = list(
+        unified_diff(
+            before_lines,
+            after_lines,
+            fromfile=fromfile,
+            tofile=tofile,
+            lineterm="",
+        )
+    )
+    if not diff_lines:
+        return None, False
+
+    diff = "\n".join(diff_lines)
+    if len(diff) <= MAX_DIFF_OUTPUT_CHARS:
+        return diff, False
+    truncated = diff[: MAX_DIFF_OUTPUT_CHARS - 3].rstrip() + "..."
+    return truncated, True
+
 
 class ReadTool(WorkspaceTool):
     name = "read"
@@ -189,11 +231,29 @@ class WriteTool(WorkspaceTool):
                 raise ValueError(
                     f"Content is too large to write safely (> {MAX_TEXT_FILE_BYTES} bytes)"
                 )
-            if path.exists() and not path.is_file():
+            existed = path.exists()
+            previous_content = self._read_existing_text(path) if existed else ""
+            if existed and not path.is_file():
                 raise ValueError(f"Path is not a regular file: {self.path}")
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(self.content, encoding="utf-8")
-            return self._success(path=self.path, bytes_written=len(encoded))
+            diff = None
+            diff_truncated = False
+            display_path = self._relative(path)
+            if previous_content is not None:
+                diff, diff_truncated = build_unified_diff(
+                    display_path,
+                    previous_content,
+                    self.content,
+                    created=not existed,
+                )
+            return self._success(
+                path=self.path,
+                bytes_written=len(encoded),
+                created=not existed,
+                diff=diff,
+                diff_truncated=diff_truncated,
+            )
         except Exception as exc:
             return self._error(str(exc), path=self.path)
 
@@ -275,7 +335,13 @@ class EditTool(WorkspaceTool):
                 updated = updated[:start] + new_text + updated[end:]
 
             path.write_text(updated, encoding="utf-8")
-            return self._success(path=self.path, edits_applied=len(resolved_edits))
+            diff, diff_truncated = build_unified_diff(self._relative(path), original, updated)
+            return self._success(
+                path=self.path,
+                edits_applied=len(resolved_edits),
+                diff=diff,
+                diff_truncated=diff_truncated,
+            )
         except Exception as exc:
             return self._error(str(exc), path=self.path)
 
