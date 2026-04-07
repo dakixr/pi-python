@@ -134,12 +134,8 @@ class StatusIndicator:
             self._update("Waiting on tool result")
             return
         if event == "tool_execution_end":
-            tool_name = payload.get("tool_name", "tool")
             ok = payload.get("ok", False)
-            state = "done" if ok else "failed"
-            style = "green" if ok else "red"
-            self._log_event_line("Tool", f"{tool_name} {state}", style=style)
-            self._update("Thinking")
+            self._update("Thinking" if ok else "Handling tool failure")
 
     def clear(self) -> None:
         with self._lock:

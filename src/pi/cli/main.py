@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 import inspect
 import os
 from dataclasses import dataclass
@@ -117,7 +118,7 @@ def run_interactive_cli(
 ) -> int:
     messages = list(session_messages)
     stdout_console = build_console(stdout)
-    renderer = InteractiveRenderer(stderr)
+    renderer = InteractiveRenderer(stdout)
     input_queue: Queue[str | None] = Queue()
     result_queue: Queue[TurnSuccess | TurnFailure] = Queue()
     pending_prompts: list[str] = []
@@ -125,10 +126,17 @@ def run_interactive_cli(
     shutdown_requested = False
     input_closed = False
 
+    use_prompt_toolkit = input_func is input and stdout_console.is_terminal
+
     def read_input() -> None:
+        prompt_session = None
+        if use_prompt_toolkit:
+            from prompt_toolkit import PromptSession
+
+            prompt_session = PromptSession()
         while True:
             try:
-                raw = input_func(">>> ")
+                raw = prompt_session.prompt(">>> ") if prompt_session is not None else input_func(">>> ")
             except (EOFError, StopIteration):
                 input_queue.put(None)
                 return
@@ -149,59 +157,66 @@ def run_interactive_cli(
         thread.start()
         return thread
 
-    Thread(target=read_input, daemon=True).start()
-    if stdout_console.is_terminal:
-        stdout_console.print("[bold cyan]pi[/bold cyan] interactive mode. Type `exit` or `quit` to leave.\n")
-    while True:
-        try:
-            while True:
-                prompt = input_queue.get_nowait()
-                if prompt is None:
-                    input_closed = True
-                    shutdown_requested = True
-                    continue
-                if not prompt:
-                    continue
-                if prompt.lower() in {"exit", "quit"}:
-                    shutdown_requested = True
-                    continue
-                if worker is None and not pending_prompts:
-                    print_user_prompt(stdout_console, prompt)
-                    worker = start_turn(prompt)
+    patch_context = nullcontext()
+    if use_prompt_toolkit:
+        from prompt_toolkit.patch_stdout import patch_stdout
+
+        patch_context = patch_stdout(raw=True)
+
+    with patch_context:
+        Thread(target=read_input, daemon=True).start()
+        if stdout_console.is_terminal:
+            stdout_console.print("[bold cyan]pi[/bold cyan] interactive mode. Type `exit` or `quit` to leave.\n")
+        while True:
+            try:
+                while True:
+                    prompt = input_queue.get_nowait()
+                    if prompt is None:
+                        input_closed = True
+                        shutdown_requested = True
+                        continue
+                    if not prompt:
+                        continue
+                    if prompt.lower() in {"exit", "quit"}:
+                        shutdown_requested = True
+                        continue
+                    if worker is None and not pending_prompts:
+                        print_user_prompt(stdout_console, prompt)
+                        worker = start_turn(prompt)
+                    else:
+                        pending_prompts.append(prompt)
+                        renderer.log_queued_message(prompt)
+                        renderer.set_queue_count(len(pending_prompts))
+            except Empty:
+                pass
+
+            try:
+                outcome = result_queue.get_nowait()
+            except Empty:
+                outcome = None
+
+            if outcome is not None:
+                worker = None
+                if isinstance(outcome, TurnFailure):
+                    print_error(stdout_console, str(outcome.error))
                 else:
-                    pending_prompts.append(prompt)
-                    renderer.log_queued_message(prompt)
-                    renderer.set_queue_count(len(pending_prompts))
-        except Empty:
-            pass
-
-        try:
-            outcome = result_queue.get_nowait()
-        except Empty:
-            outcome = None
-
-        if outcome is not None:
-            worker = None
-            if isinstance(outcome, TurnFailure):
-                print_error(stdout_console, str(outcome.error))
-            else:
-                messages = outcome.result.messages
-                if session_store and args.session:
-                    session_store.save(args.session, messages)
-                print_agent_output(stdout_console, outcome.result.output)
-            renderer.set_queue_count(len(pending_prompts))
-            if pending_prompts:
-                next_prompt = pending_prompts.pop(0)
+                    messages = outcome.result.messages
+                    if session_store and args.session:
+                        session_store.save(args.session, messages)
+                    print_agent_output(stdout_console, outcome.result.output)
                 renderer.set_queue_count(len(pending_prompts))
-                print_user_prompt(stdout_console, next_prompt)
-                worker = start_turn(next_prompt)
+                if pending_prompts:
+                    next_prompt = pending_prompts.pop(0)
+                    renderer.set_queue_count(len(pending_prompts))
+                    print_user_prompt(stdout_console, next_prompt)
+                    worker = start_turn(next_prompt)
 
-        if shutdown_requested and worker is None and not pending_prompts:
-            if input_closed:
-                stdout_console.print()
-            return 0
+            if shutdown_requested and worker is None and not pending_prompts:
+                if input_closed:
+                    stdout_console.print()
+                return 0
 
-        time.sleep(0.05)
+            time.sleep(0.05)
 
 
 def run_cli(
