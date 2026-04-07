@@ -1,3 +1,3 @@
-from pi.cli.main import main
+from pi.cli.main import CLIArgs, app, main, run_cli
 
-__all__ = ["main"]
+__all__ = ["CLIArgs", "app", "main", "run_cli"]

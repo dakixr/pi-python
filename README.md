@@ -1,181 +1,93 @@
 # pi-python
 
-`pi-python` is the Python package and distribution name. Internally, the runtime, module path, and CLI are all `pi`.
+`pi-python` is a modern Python rewrite of the local `pi-mono` workspace with two layers:
 
-The current implementation stays intentionally non-streaming. Each turn runs to completion, returns one assistant response, and optionally persists the full conversation locally for later reuse.
+- a native Python agent/runtime/SDK under `pi.agent`, `pi.ai`, and `pi.cli`
+- compatibility entrypoints for upstream packages that still make more sense to delegate
 
-The codebase stays deliberately small:
+The compatibility layer targets `/tmp/pi-mono-aBS53I` by default, or `PI_MONO_REPO` when set.
 
-- `pi.agent`: message models, provider abstraction, context management, tool definitions, and the agent loop
-- `pi.cli`: argument parsing, session persistence, and an interactive or one-shot CLI
+## Port Status
 
-## Why this shape
+This repo is intentionally explicit about what is native, hybrid, and still delegated.
 
-The MVP is meant to be easy to extend without carrying framework weight too early:
+| Package | Status | Notes |
+| --- | --- | --- |
+| `pi.agent` | Native | Python loop, tool execution, hooks, parallel tool mode, context compaction |
+| `pi.ai` / `pi-ai` | Hybrid | Native Python SDK surface plus upstream OAuth/provider CLI flows |
+| `pi.cli` / `pi-core` | Native | Python one-shot and interactive CLI with JSONL-backed sessions |
+| `pi.coding_agent` / `pi` | Wrapper | Delegates to upstream TypeScript coding-agent |
+| `pi.pods` / `pi-pods` | Hybrid | Native config/store, upstream operational CLI |
+| `pi.mom` / `mom` | Hybrid | Native sandbox parsing, upstream bot/runtime |
+| `pi.tui` | Native subset | Python text helpers only |
+| `pi.web_ui` | Wrapper | Python helpers around upstream web UI assets |
 
-- provider logic is isolated behind a `Provider` protocol
-- each concrete tool is its own Pydantic schema plus execution logic
-- the loop only knows about context preparation, providers, and tool execution
-- the CLI depends on the loop, not the other way around
+For a machine-readable view, import `pi.porting.port_status()`.
 
-## Project layout
+## Native Python Surface
 
-```text
-pi-python/
-├── pyproject.toml
-├── README.md
-├── src/pi/
-│   ├── __init__.py
-│   ├── __main__.py
-│   ├── agent/
-│   │   ├── __init__.py
-│   │   ├── context.py
-│   │   ├── loop.py
-│   │   ├── models.py
-│   │   ├── tools.py
-│   │   └── providers/
-│   │       ├── __init__.py
-│   │       ├── base.py
-│   │       └── zai.py
-│   └── cli/
-│       ├── __init__.py
-│       ├── main.py
-│       └── session.py
-└── tests/
-    ├── test_cli.py
-    ├── test_loop.py
-    ├── test_provider_zai.py
-    └── test_tools.py
+The native core now covers the pieces that are actually useful to embed from Python:
+
+- `pi.agent.Agent` with sequential or parallel tool execution
+- `before_tool_call` and `after_tool_call` hooks
+- `ToolRegistry` plus native `read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls`
+- shared truncation semantics closer to upstream: `2000` lines or `50KB`
+- JSONL-backed session persistence with compatibility snapshots
+- `pi.ai.complete(...)`, `pi.ai.stream(...)`, `pi.ai.create_agent(...)`, and `pi.ai.run_task(...)`
+- provider support for native `ZAIProvider` and a generic `OpenAICompatibleProvider`
+
+## Example
+
+```python
+from pathlib import Path
+
+from pi.ai import ZAIConfig, ZAIProvider, run_task
+
+provider = ZAIProvider(ZAIConfig(api_key="...", model="glm-5.1"))
+result = run_task(
+    "Create a hello.py file that prints hello",
+    provider=provider,
+    root=Path.cwd(),
+    system_prompt="You are a coding assistant.",
+)
+
+print(result.output)
 ```
 
-## ZAI provider
+For direct completion-style usage without the agent loop:
 
-The first provider is `ZAIProvider`, targeting the OpenAI-style chat completions interface documented by Z.AI:
+```python
+from pi.ai import Context, complete
 
-- endpoint: `https://api.z.ai/api/coding/paas/v4/chat/completions`
-- model default: `glm-5.1`
-- tool calling: OpenAI-style `tools` + `tool_choice="auto"`
-- retries: up to 3 total attempts for `429` and transient `5xx` responses
-- rate limits: honors `Retry-After` when present, otherwise uses a short exponential backoff
+response = complete(
+    provider=provider,
+    context=Context.from_prompt("Summarize this repository", system_prompt="Be concise."),
+)
 
-The implementation is ready for real API keys, but the tests keep it fully mocked. Provider failures are translated into concise runtime errors so the CLI exits cleanly instead of dumping a traceback for expected API problems.
-
-## Tools
-
-The runtime is now definition-first: each tool is a child `BaseModel` with:
-
-- stable metadata (`name`, `description`)
-- argument fields declared directly on the concrete tool class
-- local execution logic
-
-That makes registration simple and extensible without hard-coding schemas in the registry.
-
-The built-in tool factories mirror the TypeScript reference structure:
-
-- coding tools: `read`, `bash`, `edit`, `write`
-- read-only tools: `read`, `grep`, `find`, `ls`
-- all tools: both sets combined
-
-File operations are restricted to a configured workspace root and must use relative paths. The runtime also rejects oversized text payloads, caps captured shell output, and supports richer schemas such as:
-
-- `read(path, offset?, limit?)`
-- `edit(path, oldText/newText)` or `edit(path, edits=[...])`
-- `bash(command, timeout?)` with no default timeout
-
-## Context Engineering
-
-The loop now uses a small `ContextManager` before the provider boundary:
-
-- initialize a run from prior messages plus the new prompt
-- inject the system prompt only when needed
-- optionally transform messages before the provider sees them
-- compact older provider-bound messages into a lossy summary while keeping recent work intact
-- append structured tool-result messages in one place
-
-Compaction is provider-side only: persisted session history stays intact, while oversized requests are summarized before they are sent upstream.
-
-## Sessions
-
-Use `--session <name>` to load and persist conversation state across separate CLI invocations. Sessions are stored as JSON in:
-
-```text
-<workspace-root>/.pi/sessions/<name>.json
+print(response.output)
 ```
 
-That state includes the full message history used by the agent loop, so a later run can continue the prior conversation without streaming or an external database.
-
-## Usage
-
-Set an API key:
+## Entry Points
 
 ```bash
-export ZAI_API_KEY=your-api-key
+uv run pi --help
+uv run pi-core --help
+uv run pi-ai --help
+uv run pi-pods --help
+uv run mom --help
 ```
 
-Run one prompt:
+`pi`, `pi-ai`, `pi-pods`, and `mom` resolve the upstream repository, install npm dependencies on demand, and invoke the TypeScript entrypoint through `tsx`.
 
-```bash
-uv run pi --prompt "Create a hello world file in this workspace"
-```
+## Configuration
 
-If the provider returns a retryable API error and the retries are exhausted, the CLI prints a short error to stderr and exits with code `1`.
-
-Run one prompt and persist the conversation under a named session:
-
-```bash
-uv run pi --session demo --prompt "Create a hello world file in this workspace"
-```
-
-Run interactively:
-
-```bash
-uv run pi
-```
-
-In a TTY, the CLI keeps progress output minimal: a single live status label switches between `thinking` and `tool <name>` while a turn is running.
-
-Resume the same conversation later:
-
-```bash
-uv run pi --session demo
-```
-
-Point tools at a specific workspace root:
-
-```bash
-uv run pi --root /path/to/workspace --prompt "Read README.md"
-```
+- `PI_MONO_REPO`: override the upstream repo path
+- `PI_NODE_PACKAGE_MANAGER`: override the package manager, defaults to `npm`
+- `PI_AUTO_INSTALL_UPSTREAM=0`: disable automatic dependency installation for upstream wrappers
 
 ## Development
 
-Install dependencies:
-
 ```bash
 uv sync --dev
-```
-
-Run tests:
-
-```bash
 uv run pytest
 ```
-
-## Testing scope
-
-The tests cover:
-
-- ZAI response parsing and request payload shape
-- tool execution, workspace boundary checks, and Pydantic-backed tool registration
-- the agent loop from tool call to final assistant output, including context transforms
-- one-shot CLI execution plus named session persistence
-
-## Assumptions
-
-- `glm-5.1` is used as the default model name for the coding-plan-oriented MVP
-- the Z.AI API remains compatible with the documented chat completions + function calling shape
-- streaming remains intentionally out of scope
-
-## Next steps
-
-- add streaming without changing the context/tool abstractions
-- support additional providers behind the same protocol

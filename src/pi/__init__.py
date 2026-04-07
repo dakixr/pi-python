@@ -1,3 +1,28 @@
-from pi.cli.main import main
+from pi.agent import (
+    AfterToolCallContext,
+    AfterToolCallResult,
+    Agent,
+    AgentContext,
+    AgentResult,
+    BeforeToolCallContext,
+    BeforeToolCallResult,
+    ContextManager,
+    create_agent,
+    run_task,
+)
 
-__all__ = ["main"]
+__version__ = "0.2.0"
+
+__all__ = [
+    "AfterToolCallContext",
+    "AfterToolCallResult",
+    "Agent",
+    "AgentContext",
+    "AgentResult",
+    "BeforeToolCallContext",
+    "BeforeToolCallResult",
+    "ContextManager",
+    "create_agent",
+    "run_task",
+    "__version__",
+]

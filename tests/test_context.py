@@ -21,10 +21,7 @@ def test_context_manager_compacts_older_messages_for_provider_only() -> None:
             tool_calls=[
                 ToolCall(
                     id="call-1",
-                    function=ToolFunction(
-                        name="read",
-                        arguments='{"path":"README.md"}',
-                    ),
+                    function=ToolFunction(name="read", arguments='{"path":"README.md"}'),
                 )
             ],
         ),

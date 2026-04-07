@@ -1,3 +1,3 @@
-from pi.cli.main import main
+from pi.coding_agent.cli import main
 
 raise SystemExit(main())

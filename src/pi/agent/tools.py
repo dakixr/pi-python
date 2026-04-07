@@ -1,31 +1,22 @@
 from __future__ import annotations
 
-from difflib import unified_diff
-import json
-import os
-import re
-import subprocess
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Sequence
+from difflib import unified_diff
 from fnmatch import fnmatch
+import json
+import os
 from pathlib import Path
+import re
+import subprocess
+import tempfile
 from typing import ClassVar
 
-from pydantic import (
-    AliasChoices,
-    BaseModel,
-    ConfigDict,
-    Field,
-    PrivateAttr,
-    ValidationError,
-    model_validator,
-)
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, PrivateAttr, ValidationError, model_validator
 
 from pi.agent.models import ToolCall
+from pi.agent.truncate import DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, format_size, truncate_head, truncate_line, truncate_tail
 
-MAX_TEXT_FILE_BYTES = 1_000_000
-MAX_BASH_OUTPUT_CHARS = 12_000
-MAX_DIFF_OUTPUT_CHARS = 8_000
 DEFAULT_GLOB = "*"
 
 
@@ -49,7 +40,7 @@ class BaseTool(BaseModel, ABC):
     _context: dict[str, object] = PrivateAttr(default_factory=dict)
 
     @classmethod
-    def bind(cls, **context: object) -> BaseTool:
+    def bind(cls, **context: object) -> "BaseTool":
         tool = cls.model_construct()
         tool._bind_context(**context)
         return tool
@@ -57,7 +48,7 @@ class BaseTool(BaseModel, ABC):
     def _bind_context(self, **context: object) -> None:
         self._context = dict(context)
 
-    def _inherit_context(self, prototype: BaseTool) -> None:
+    def _inherit_context(self, prototype: "BaseTool") -> None:
         self._bind_context(**prototype._context)
 
     def to_definition(self) -> dict[str, object]:
@@ -70,7 +61,7 @@ class BaseTool(BaseModel, ABC):
             },
         }
 
-    def parse_arguments(self, arguments: dict[str, object]) -> BaseTool:
+    def parse_arguments(self, arguments: dict[str, object]) -> "BaseTool":
         parsed = self.__class__.model_validate(arguments)
         parsed._inherit_context(self)
         return parsed
@@ -87,11 +78,9 @@ class WorkspaceTool(BaseTool, ABC):
         root = context.get("root")
         if root is None:
             raise ValueError("Workspace root is required")
-
         candidate = Path(root).resolve()
         if not candidate.exists() or not candidate.is_dir():
             raise ValueError(f"Workspace root does not exist or is not a directory: {root}")
-
         self._context = {"root": candidate}
         self._root = candidate
 
@@ -99,33 +88,20 @@ class WorkspaceTool(BaseTool, ABC):
     def root(self) -> Path:
         return self._root
 
-    def _resolve_path(self, relative_path: str, *, allow_missing: bool = False) -> Path:
-        if not relative_path.strip():
-            raise ValueError("Path must be a non-empty relative path")
-
-        raw_path = Path(relative_path)
+    def _resolve_path(self, raw_path_value: str, *, allow_missing: bool = False) -> Path:
+        if not raw_path_value.strip():
+            raise ValueError("Path must be a non-empty path")
+        raw_path = Path(raw_path_value)
         candidate = raw_path.resolve() if raw_path.is_absolute() else (self.root / raw_path).resolve()
-        if not candidate.is_relative_to(self.root):
-            raise ValueError(f"Path {relative_path!r} is outside the workspace root")
         if not allow_missing and not candidate.exists():
-            raise FileNotFoundError(relative_path)
+            raise FileNotFoundError(raw_path_value)
         return candidate
 
     def _ensure_text_file(self, path: Path) -> None:
         if not path.exists():
             raise FileNotFoundError(path)
         if not path.is_file():
-            raise ValueError(f"Path is not a regular file: {path.relative_to(self.root)}")
-        if path.stat().st_size > MAX_TEXT_FILE_BYTES:
-            raise ValueError(
-                f"File is too large to process safely (> {MAX_TEXT_FILE_BYTES} bytes)"
-            )
-
-    def _trim_output(self, value: str) -> tuple[str, bool]:
-        trimmed = value.rstrip("\n")
-        if len(trimmed) <= MAX_BASH_OUTPUT_CHARS:
-            return trimmed, False
-        return trimmed[:MAX_BASH_OUTPUT_CHARS], True
+            raise ValueError(f"Path is not a regular file: {self._display_path(path)}")
 
     def _success(self, **payload: object) -> dict[str, object]:
         return {"ok": True, **payload}
@@ -134,54 +110,127 @@ class WorkspaceTool(BaseTool, ABC):
         return {"ok": False, "error": error, **payload}
 
     def _relative(self, path: Path) -> str:
-        return str(path.relative_to(self.root))
+        return self._display_path(path)
+
+    def _display_path(self, path: Path) -> str:
+        try:
+            return str(path.relative_to(self.root))
+        except ValueError:
+            return str(path)
 
     def _read_existing_text(self, path: Path) -> str | None:
         if not path.exists() or not path.is_file():
-            return None
-        if path.stat().st_size > MAX_TEXT_FILE_BYTES:
             return None
         try:
             return path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             return None
 
+    def _walk(self, path: Path) -> Iterable[Path]:
+        if path.is_file():
+            yield path
+            return
+        yield path
+        for root, dirs, files in os.walk(path):
+            dirs[:] = sorted(entry for entry in dirs if entry != ".git")
+            current_root = Path(root)
+            for name in sorted(files):
+                yield current_root / name
+            for name in dirs:
+                yield current_root / name
 
-def build_unified_diff(
-    path: str,
-    before: str,
-    after: str,
-    *,
-    created: bool = False,
-) -> tuple[str | None, bool]:
-    before_lines = [] if created else before.splitlines()
-    after_lines = after.splitlines()
-    fromfile = "/dev/null" if created else f"a/{path}"
-    tofile = f"b/{path}"
+    def _iter_files(self, path: Path, *, glob: str = DEFAULT_GLOB) -> Iterable[Path]:
+        if path.is_file():
+            if fnmatch(path.name, glob):
+                yield path
+            return
+
+        git_candidates = self._iter_git_files(path, glob=glob)
+        if git_candidates is not None:
+            yield from git_candidates
+            return
+
+        for root, dirs, files in os.walk(path):
+            dirs[:] = sorted(entry for entry in dirs if entry != ".git")
+            current_root = Path(root)
+            for name in sorted(files):
+                if fnmatch(name, glob):
+                    yield current_root / name
+
+    def _iter_git_files(self, path: Path, *, glob: str) -> Iterable[Path] | None:
+        try:
+            path.relative_to(self.root)
+        except ValueError:
+            return None
+        try:
+            completed = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(self.root),
+                    "ls-files",
+                    "--cached",
+                    "--others",
+                    "--exclude-standard",
+                    "--full-name",
+                    "--",
+                    self._git_pathspec(path),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            return None
+        if completed.returncode != 0:
+            return None
+
+        resolved_path = path.resolve()
+        seen: set[Path] = set()
+        candidates: list[Path] = []
+        for line in completed.stdout.splitlines():
+            candidate = (self.root / line).resolve()
+            if not candidate.exists() or not candidate.is_file():
+                continue
+            try:
+                candidate.relative_to(resolved_path)
+            except ValueError:
+                if candidate != resolved_path:
+                    continue
+            if candidate not in seen and fnmatch(candidate.name, glob):
+                seen.add(candidate)
+                candidates.append(candidate)
+        return candidates
+
+    def _git_pathspec(self, path: Path) -> str:
+        relative = path.relative_to(self.root)
+        if not relative.parts:
+            return "."
+        return str(relative)
+
+
+def build_unified_diff(path: str, before: str, after: str, *, created: bool = False) -> tuple[str | None, bool]:
     diff_lines = list(
         unified_diff(
-            before_lines,
-            after_lines,
-            fromfile=fromfile,
-            tofile=tofile,
+            [] if created else before.splitlines(),
+            after.splitlines(),
+            fromfile="/dev/null" if created else f"a/{path}",
+            tofile=f"b/{path}",
             lineterm="",
         )
     )
     if not diff_lines:
         return None, False
-
     diff = "\n".join(diff_lines)
-    if len(diff) <= MAX_DIFF_OUTPUT_CHARS:
-        return diff, False
-    truncated = diff[: MAX_DIFF_OUTPUT_CHARS - 3].rstrip() + "..."
-    return truncated, True
+    truncation = truncate_head(diff)
+    return truncation.content, truncation.truncated
 
 
 class ReadTool(WorkspaceTool):
     name = "read"
     description = (
-        "Read a UTF-8 text file relative to the workspace root. "
-        "Supports offset/limit for large files."
+        "Read a UTF-8 text file. Relative paths resolve from the configured root. "
+        "Output is truncated to 2000 lines or 50KB. Use offset/limit to continue."
     )
 
     path: str = Field(min_length=1)
@@ -193,24 +242,53 @@ class ReadTool(WorkspaceTool):
             path = self._resolve_path(self.path)
             self._ensure_text_file(path)
             content = path.read_text(encoding="utf-8")
-
-            if self.offset is None and self.limit is None:
-                return self._success(path=self.path, content=content)
-
-            lines = content.splitlines()
-            if content.endswith("\n"):
-                lines.append("")
+            all_lines = content.split("\n")
             start = (self.offset or 1) - 1
-            if start >= len(lines):
-                raise ValueError(f"Offset {self.offset} is beyond end of file")
-            end = start + self.limit if self.limit is not None else len(lines)
-            selected = lines[start:end]
+            if start >= len(all_lines):
+                raise ValueError(f"Offset {self.offset} is beyond end of file ({len(all_lines)} lines total)")
+            selected_content = (
+                "\n".join(all_lines[start : start + self.limit])
+                if self.limit is not None
+                else "\n".join(all_lines[start:])
+            )
+            truncation = truncate_head(selected_content)
+            start_line = start + 1
+            next_offset = None
+            output_text = truncation.content
+            details: dict[str, object] | None = None
+
+            if truncation.first_line_exceeds_limit:
+                first_line_size = format_size(len(all_lines[start].encode("utf-8")))
+                output_text = (
+                    f"[Line {start_line} is {first_line_size}, exceeds {format_size(DEFAULT_MAX_BYTES)} limit. "
+                    f"Use bash: sed -n '{start_line}p' {self.path} | head -c {DEFAULT_MAX_BYTES}]"
+                )
+                details = {"truncation": truncation.to_dict()}
+            elif truncation.truncated:
+                end_line = start_line + truncation.output_lines - 1
+                next_offset = end_line + 1
+                suffix = (
+                    f"[Showing lines {start_line}-{end_line} of {len(all_lines)}. Use offset={next_offset} to continue.]"
+                    if truncation.truncated_by == "lines"
+                    else (
+                        f"[Showing lines {start_line}-{end_line} of {len(all_lines)} "
+                        f"({format_size(DEFAULT_MAX_BYTES)} limit). Use offset={next_offset} to continue.]"
+                    )
+                )
+                output_text = f"{truncation.content}\n\n{suffix}"
+                details = {"truncation": truncation.to_dict()}
+            elif self.limit is not None and start + self.limit < len(all_lines):
+                next_offset = start + self.limit + 1
+                remaining = len(all_lines) - (start + self.limit)
+                output_text = f"{truncation.content}\n\n[{remaining} more lines in file. Use offset={next_offset} to continue.]"
+
             return self._success(
                 path=self.path,
-                content="\n".join(selected),
+                content=output_text,
                 offset=self.offset or 1,
                 limit=self.limit,
-                next_offset=end + 1 if end < len(lines) else None,
+                next_offset=next_offset,
+                details=details,
             )
         except Exception as exc:
             return self._error(str(exc), path=self.path)
@@ -218,7 +296,7 @@ class ReadTool(WorkspaceTool):
 
 class WriteTool(WorkspaceTool):
     name = "write"
-    description = "Write a UTF-8 text file relative to the workspace root."
+    description = "Write a UTF-8 text file. Relative paths resolve from the configured root."
 
     path: str = Field(min_length=1)
     content: str
@@ -226,11 +304,6 @@ class WriteTool(WorkspaceTool):
     def execute(self) -> dict[str, object]:
         try:
             path = self._resolve_path(self.path, allow_missing=True)
-            encoded = self.content.encode("utf-8")
-            if len(encoded) > MAX_TEXT_FILE_BYTES:
-                raise ValueError(
-                    f"Content is too large to write safely (> {MAX_TEXT_FILE_BYTES} bytes)"
-                )
             existed = path.exists()
             previous_content = self._read_existing_text(path) if existed else ""
             if existed and not path.is_file():
@@ -239,17 +312,11 @@ class WriteTool(WorkspaceTool):
             path.write_text(self.content, encoding="utf-8")
             diff = None
             diff_truncated = False
-            display_path = self._relative(path)
             if previous_content is not None:
-                diff, diff_truncated = build_unified_diff(
-                    display_path,
-                    previous_content,
-                    self.content,
-                    created=not existed,
-                )
+                diff, diff_truncated = build_unified_diff(self._relative(path), previous_content, self.content, created=not existed)
             return self._success(
                 path=self.path,
-                bytes_written=len(encoded),
+                bytes_written=len(self.content.encode("utf-8")),
                 created=not existed,
                 diff=diff,
                 diff_truncated=diff_truncated,
@@ -260,29 +327,17 @@ class WriteTool(WorkspaceTool):
 
 class EditTool(WorkspaceTool):
     name = "edit"
-    description = (
-        "Replace exact text in a UTF-8 file. "
-        "Use oldText/newText for one change or edits for multiple disjoint changes."
-    )
+    description = "Replace exact text in a UTF-8 file. Use oldText/newText for one change or edits for multiple disjoint changes."
 
     path: str = Field(min_length=1)
-    old_text: str | None = Field(
-        default=None,
-        validation_alias=AliasChoices("oldText", "old_text"),
-        serialization_alias="oldText",
-    )
-    new_text: str | None = Field(
-        default=None,
-        validation_alias=AliasChoices("newText", "new_text"),
-        serialization_alias="newText",
-    )
+    old_text: str | None = Field(default=None, validation_alias=AliasChoices("oldText", "old_text"), serialization_alias="oldText")
+    new_text: str | None = Field(default=None, validation_alias=AliasChoices("newText", "new_text"), serialization_alias="newText")
     edits: list[ReplaceEdit] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def validate_edit_mode(self) -> EditTool:
+    def validate_edit_mode(self) -> "EditTool":
         single_mode = self.old_text is not None or self.new_text is not None
         multi_mode = bool(self.edits)
-
         if single_mode and multi_mode:
             raise ValueError("Use either oldText/newText or edits, not both.")
         if not single_mode and not multi_mode:
@@ -301,61 +356,39 @@ class EditTool(WorkspaceTool):
             path = self._resolve_path(self.path)
             self._ensure_text_file(path)
             original = path.read_text(encoding="utf-8")
-
             resolved_edits: list[tuple[int, int, str, str]] = []
             for edit in self.normalized_edits():
                 start = original.find(edit.old_text)
                 if start == -1:
                     return self._error(f"Text not found in {self.path}", path=self.path)
-                second_match = original.find(edit.old_text, start + 1)
-                if second_match != -1:
-                    return self._error(
-                        f"Text to replace is not unique in {self.path}",
-                        path=self.path,
-                    )
-                resolved_edits.append(
-                    (start, start + len(edit.old_text), edit.old_text, edit.new_text)
-                )
-
+                if original.find(edit.old_text, start + 1) != -1:
+                    return self._error(f"Text to replace is not unique in {self.path}", path=self.path)
+                resolved_edits.append((start, start + len(edit.old_text), edit.old_text, edit.new_text))
             resolved_edits.sort(key=lambda item: item[0])
             for current, following in zip(resolved_edits, resolved_edits[1:]):
                 if current[1] > following[0]:
-                    return self._error(
-                        f"Edits overlap in {self.path}. Merge nearby changes into one edit.",
-                        path=self.path,
-                    )
-
+                    return self._error(f"Edits overlap in {self.path}. Merge nearby changes into one edit.", path=self.path)
             updated = original
             for start, end, old_text, new_text in reversed(resolved_edits):
                 if updated[start:end] != old_text:
-                    return self._error(
-                        f"Edit no longer matches file content in {self.path}",
-                        path=self.path,
-                    )
+                    return self._error(f"Edit no longer matches file content in {self.path}", path=self.path)
                 updated = updated[:start] + new_text + updated[end:]
-
             path.write_text(updated, encoding="utf-8")
             diff, diff_truncated = build_unified_diff(self._relative(path), original, updated)
-            return self._success(
-                path=self.path,
-                edits_applied=len(resolved_edits),
-                diff=diff,
-                diff_truncated=diff_truncated,
-            )
+            return self._success(path=self.path, edits_applied=len(resolved_edits), diff=diff, diff_truncated=diff_truncated)
         except Exception as exc:
             return self._error(str(exc), path=self.path)
 
 
 class BashTool(WorkspaceTool):
     name = "bash"
-    description = "Run a shell command in the workspace root."
-
-    command: str = Field(min_length=1, max_length=4000)
-    timeout: int | None = Field(
-        default=None,
-        ge=1,
-        validation_alias=AliasChoices("timeout", "timeout_seconds"),
+    description = (
+        "Run a shell command in the workspace root. Output keeps the last 2000 lines or 50KB. "
+        "When truncated, full output is saved to a temp file."
     )
+
+    command: str = Field(min_length=1)
+    timeout: int | None = Field(default=None, ge=1, validation_alias=AliasChoices("timeout", "timeout_seconds"))
 
     def execute(self) -> dict[str, object]:
         try:
@@ -364,47 +397,62 @@ class BashTool(WorkspaceTool):
                 "capture_output": True,
                 "text": True,
                 "check": False,
-                "env": {"PATH": os.environ.get("PATH", "")},
+                "env": os.environ.copy(),
             }
             if self.timeout is not None:
                 run_kwargs["timeout"] = self.timeout
-
-            completed = subprocess.run(["bash", "-c", self.command], **run_kwargs)
-            stdout, stdout_truncated = self._trim_output(completed.stdout)
-            stderr, stderr_truncated = self._trim_output(completed.stderr)
-            return {
-                "ok": completed.returncode == 0,
-                "command": self.command,
-                "returncode": completed.returncode,
-                "stdout": stdout,
-                "stderr": stderr,
-                "stdout_truncated": stdout_truncated,
-                "stderr_truncated": stderr_truncated,
-                "timeout": self.timeout,
-            }
-        except subprocess.TimeoutExpired as exc:
-            stdout, stdout_truncated = self._trim_output(exc.stdout or "")
-            stderr, stderr_truncated = self._trim_output(exc.stderr or "")
-            return self._error(
-                f"Command timed out after {self.timeout} seconds",
-                command=self.command,
-                stdout=stdout,
-                stderr=stderr,
-                stdout_truncated=stdout_truncated,
-                stderr_truncated=stderr_truncated,
-                timeout=self.timeout,
+            completed = subprocess.run(["bash", "-lc", self.command], **run_kwargs)
+            return self._build_result(
+                returncode=completed.returncode,
+                stdout=completed.stdout,
+                stderr=completed.stderr,
             )
+        except subprocess.TimeoutExpired as exc:
+            result = self._build_result(returncode=-1, stdout=exc.stdout or "", stderr=exc.stderr or "")
+            result["ok"] = False
+            result["error"] = f"Command timed out after {self.timeout} seconds"
+            return result
         except Exception as exc:
             return self._error(str(exc), command=self.command, timeout=self.timeout)
+
+    def _build_result(self, *, returncode: int, stdout: str, stderr: str) -> dict[str, object]:
+        combined_parts = [part.rstrip("\n") for part in (stdout, stderr) if part]
+        combined_output = "\n".join(part for part in combined_parts if part)
+        combined_truncation = truncate_tail(combined_output)
+        stdout_truncation = truncate_tail(stdout.rstrip("\n"))
+        stderr_truncation = truncate_tail(stderr.rstrip("\n"))
+        full_output_path = None
+        if combined_truncation.truncated:
+            fd, full_output_path = tempfile.mkstemp(prefix="pi-bash-", suffix=".log")
+            os.close(fd)
+            Path(full_output_path).write_text(combined_output, encoding="utf-8")
+        payload = {
+            "ok": returncode == 0,
+            "command": self.command,
+            "returncode": returncode,
+            "stdout": stdout_truncation.content.rstrip("\n"),
+            "stderr": stderr_truncation.content.rstrip("\n"),
+            "output": combined_truncation.content.rstrip("\n"),
+            "stdout_truncated": stdout_truncation.truncated,
+            "stderr_truncated": stderr_truncation.truncated,
+            "timeout": self.timeout,
+            "details": {
+                "truncation": combined_truncation.to_dict(),
+                "fullOutputPath": full_output_path,
+            },
+        }
+        if full_output_path is not None:
+            payload["full_output_path"] = full_output_path
+        return payload
 
 
 class LsTool(WorkspaceTool):
     name = "ls"
-    description = "List files and directories under a workspace-relative path."
+    description = "List files and directories under a path. Relative paths resolve from the configured root."
 
     path: str = Field(default=".", min_length=1)
     recursive: bool = False
-    limit: int = Field(default=200, ge=1, le=1_000)
+    limit: int = Field(default=200, ge=1, le=5_000)
 
     def execute(self) -> dict[str, object]:
         try:
@@ -412,80 +460,64 @@ class LsTool(WorkspaceTool):
             if path.is_file():
                 entries = [self._relative(path)]
             else:
-                iterator = path.rglob("*") if self.recursive else path.iterdir()
-                entries = sorted(self._relative(entry) for entry in iterator)[: self.limit]
-            return self._success(path=self.path, entries=entries, recursive=self.recursive)
+                iterator = self._walk(path) if self.recursive else sorted(path.iterdir())
+                entries = [self._relative(entry) for entry in iterator if entry != path][: self.limit]
+            return self._success(path=self.path, entries=entries, recursive=self.recursive, truncated=len(entries) >= self.limit)
         except Exception as exc:
             return self._error(str(exc), path=self.path)
 
 
 class FindTool(WorkspaceTool):
     name = "find"
-    description = "Find workspace files or directories whose relative path matches a glob."
+    description = "Find files or directories whose displayed path matches a glob."
 
     path: str = Field(default=".", min_length=1)
     pattern: str = Field(min_length=1)
-    limit: int = Field(default=100, ge=1, le=1_000)
+    limit: int = Field(default=100, ge=1, le=5_000)
 
     def execute(self) -> dict[str, object]:
         try:
             path = self._resolve_path(self.path)
-            if path.is_file():
-                candidates = [path]
-            else:
-                candidates = [path, *path.rglob("*")]
-
             matches: list[str] = []
-            for candidate in candidates:
+            for candidate in self._walk(path):
                 relative = self._relative(candidate)
                 if fnmatch(relative, self.pattern) or fnmatch(candidate.name, self.pattern):
                     matches.append(relative)
                 if len(matches) >= self.limit:
                     break
-            return self._success(path=self.path, pattern=self.pattern, matches=matches)
+            return self._success(path=self.path, pattern=self.pattern, matches=matches, truncated=len(matches) >= self.limit)
         except Exception as exc:
             return self._error(str(exc), path=self.path, pattern=self.pattern)
 
 
 class GrepTool(WorkspaceTool):
     name = "grep"
-    description = "Search workspace text files with a regular expression."
+    description = "Search text files with a regular expression. Relative paths resolve from the configured root."
 
     path: str = Field(default=".", min_length=1)
     pattern: str = Field(min_length=1)
     glob: str = Field(default=DEFAULT_GLOB, min_length=1)
-    limit: int = Field(default=50, ge=1, le=500)
+    limit: int = Field(default=50, ge=1, le=5_000)
 
     def execute(self) -> dict[str, object]:
         try:
             root = self._resolve_path(self.path)
             regex = re.compile(self.pattern)
             matches: list[dict[str, object]] = []
-
-            candidates: Iterable[Path]
-            if root.is_file():
-                candidates = [root]
-            else:
-                candidates = (
-                    candidate
-                    for candidate in root.rglob("*")
-                    if candidate.is_file() and fnmatch(candidate.name, self.glob)
-                )
-
-            for candidate in candidates:
-                if candidate.stat().st_size > MAX_TEXT_FILE_BYTES:
-                    continue
+            for candidate in self._iter_files(root, glob=self.glob):
                 try:
                     text = candidate.read_text(encoding="utf-8")
                 except UnicodeDecodeError:
                     continue
                 for line_number, line in enumerate(text.splitlines(), start=1):
                     if regex.search(line):
+                        rendered_line, line_truncated = truncate_line(line)
                         matches.append(
                             {
                                 "path": self._relative(candidate),
                                 "line": line_number,
-                                "text": line,
+                                "text": rendered_line,
+                                "line_truncated": line_truncated,
                             }
                         )
                     if len(matches) >= self.limit:
@@ -494,46 +526,23 @@ class GrepTool(WorkspaceTool):
                             pattern=self.pattern,
                             glob=self.glob,
                             matches=matches,
+                            truncated=True,
                         )
-
-            return self._success(
-                path=self.path,
-                pattern=self.pattern,
-                glob=self.glob,
-                matches=matches,
-            )
+            return self._success(path=self.path, pattern=self.pattern, glob=self.glob, matches=matches, truncated=False)
         except Exception as exc:
             return self._error(str(exc), path=self.path, pattern=self.pattern, glob=self.glob)
 
 
 def create_coding_tools(root: Path) -> list[BaseTool]:
-    return [
-        ReadTool.bind(root=root),
-        BashTool.bind(root=root),
-        EditTool.bind(root=root),
-        WriteTool.bind(root=root),
-    ]
+    return [ReadTool.bind(root=root), BashTool.bind(root=root), EditTool.bind(root=root), WriteTool.bind(root=root)]
 
 
 def create_read_only_tools(root: Path) -> list[BaseTool]:
-    return [
-        ReadTool.bind(root=root),
-        GrepTool.bind(root=root),
-        FindTool.bind(root=root),
-        LsTool.bind(root=root),
-    ]
+    return [ReadTool.bind(root=root), GrepTool.bind(root=root), FindTool.bind(root=root), LsTool.bind(root=root)]
 
 
 def create_all_tools(root: Path) -> list[BaseTool]:
-    return [
-        ReadTool.bind(root=root),
-        BashTool.bind(root=root),
-        EditTool.bind(root=root),
-        WriteTool.bind(root=root),
-        GrepTool.bind(root=root),
-        FindTool.bind(root=root),
-        LsTool.bind(root=root),
-    ]
+    return [*create_coding_tools(root), GrepTool.bind(root=root), FindTool.bind(root=root), LsTool.bind(root=root)]
 
 
 class ToolRegistry:
@@ -545,33 +554,46 @@ class ToolRegistry:
         self._tools = {tool.name: tool for tool in registered}
 
     @classmethod
-    def coding(cls, root: Path) -> ToolRegistry:
+    def coding(cls, root: Path) -> "ToolRegistry":
         return cls(root=root, tools=create_coding_tools(root))
 
     @classmethod
-    def read_only(cls, root: Path) -> ToolRegistry:
+    def read_only(cls, root: Path) -> "ToolRegistry":
         return cls(root=root, tools=create_read_only_tools(root))
 
     @classmethod
-    def all(cls, root: Path) -> ToolRegistry:
+    def all(cls, root: Path) -> "ToolRegistry":
         return cls(root=root, tools=create_all_tools(root))
 
     def definitions(self) -> list[dict[str, object]]:
         return [tool.to_definition() for tool in self._tools.values()]
 
-    def execute(self, tool_call: ToolCall) -> dict[str, object]:
-        tool = self._tools.get(tool_call.function.name)
+    def prepare(self, name: str, arguments: dict[str, object]) -> BaseTool:
+        tool = self._tools.get(name)
         if tool is None:
-            return {"ok": False, "error": f"Unknown tool: {tool_call.function.name}"}
+            raise KeyError(f"Unknown tool: {name}")
+        return tool.parse_arguments(arguments)
 
+    def execute_name(self, name: str, arguments: dict[str, object]) -> dict[str, object]:
         try:
-            arguments = json.loads(tool_call.function.arguments)
-        except json.JSONDecodeError as exc:
-            return {"ok": False, "error": f"Invalid tool arguments: {exc}"}
-
-        try:
-            invocation = tool.parse_arguments(arguments)
+            return self.prepare(name, arguments).execute()
+        except KeyError as exc:
+            return {"ok": False, "error": str(exc)}
         except ValidationError as exc:
             return {"ok": False, "error": f"Invalid tool payload: {exc}"}
 
-        return invocation.execute()
+    def parse_arguments(self, tool_call: ToolCall) -> dict[str, object]:
+        try:
+            arguments = json.loads(tool_call.function.arguments)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid tool arguments: {exc}") from exc
+        if not isinstance(arguments, dict):
+            raise ValueError("Tool arguments must decode to an object")
+        return arguments
+
+    def execute(self, tool_call: ToolCall) -> dict[str, object]:
+        try:
+            arguments = self.parse_arguments(tool_call)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        return self.execute_name(tool_call.function.name, arguments)

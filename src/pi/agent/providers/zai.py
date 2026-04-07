@@ -12,12 +12,7 @@ import httpx
 from pydantic import BaseModel, Field, ValidationError
 
 from pi.agent.models import Message, ToolCall
-from pi.agent.providers.base import (
-    Provider,
-    ProviderError,
-    ProviderRateLimitError,
-    ProviderServerError,
-)
+from pi.agent.providers.base import Provider, ProviderError, ProviderRateLimitError, ProviderServerError
 
 
 class ZAIConfig(BaseModel):
@@ -153,15 +148,8 @@ class ZAIProvider(Provider):
                             messages=[message.to_api_dict() for message in recovered_messages],
                         )
                         prepared_messages = recovered_messages
-                        payload["messages"] = [
-                            message.to_api_dict() for message in prepared_messages
-                        ]
+                        payload["messages"] = [message.to_api_dict() for message in prepared_messages]
                         continue
-                    self._log_debug_event(
-                        "illegal_messages_unrecoverable",
-                        detail=detail,
-                        messages=[message.to_api_dict() for message in prepared_messages],
-                    )
                 raise ProviderError(
                     f"ZAI request failed: {detail}",
                     status_code=response.status_code,
@@ -174,7 +162,6 @@ class ZAIProvider(Provider):
 
             if not completion.choices:
                 raise ProviderError("ZAI returned no completion choices.")
-
             return completion.choices[0].message.to_message()
 
         if last_error is not None:
@@ -206,66 +193,42 @@ class ZAIProvider(Provider):
         conversation = messages[start:]
         trailing_exchange_start = self._trailing_structured_exchange_start(conversation)
         if trailing_exchange_start is None:
-            projected = self._coalesce_text_messages(
-                self._render_tool_messages_as_text(conversation)
-            )
+            projected = self._coalesce_text_messages(self._render_tool_messages_as_text(conversation))
             return [*system_messages, *projected]
 
         prefix = self._render_tool_messages_as_text(conversation[:trailing_exchange_start])
-        suffix = [
-            message.model_copy(deep=True)
-            for message in conversation[trailing_exchange_start:]
-        ]
+        suffix = [message.model_copy(deep=True) for message in conversation[trailing_exchange_start:]]
         return [*system_messages, *self._coalesce_text_messages([*prefix, *suffix])]
 
     def _trailing_structured_exchange_start(self, messages: list[Message]) -> int | None:
-        if not messages:
-            return None
-
         trailing_tool_ids: list[str] = []
         index = len(messages) - 1
         while index >= 0 and messages[index].role == "tool":
-            tool_call_id = messages[index].tool_call_id
-            if tool_call_id:
-                trailing_tool_ids.append(tool_call_id)
+            if messages[index].tool_call_id:
+                trailing_tool_ids.append(messages[index].tool_call_id)
             index -= 1
-
         if not trailing_tool_ids or index < 0:
             return None
-
         assistant_message = messages[index]
         if assistant_message.role != "assistant" or not assistant_message.tool_calls:
             return None
-
         expected_ids = {tool_call.id for tool_call in assistant_message.tool_calls}
-        actual_ids = set(trailing_tool_ids)
-        if expected_ids != actual_ids:
-            return None
-        return index
+        return index if expected_ids == set(trailing_tool_ids) else None
 
     def _merge_leading_system_messages(self, messages: list[Message]) -> list[Message]:
-        if not messages:
-            return messages
-
         leading_system_messages: list[Message] = []
-        index = 0
-        for index, message in enumerate(messages):
+        for message in messages:
             if message.role != "system":
                 break
             leading_system_messages.append(message)
-        else:
-            index = len(messages)
-
         if len(leading_system_messages) <= 1:
             return messages
-
         merged_content = "\n\n".join(
             content
             for message in leading_system_messages
             if (content := message.content) and content.strip()
         )
-        merged = Message.system(merged_content)
-        return [merged, *messages[len(leading_system_messages) :]]
+        return [Message.system(merged_content), *messages[len(leading_system_messages):]]
 
     def _sanitize_message_sequence(self, messages: list[Message]) -> list[Message]:
         sanitized: list[Message] = []
@@ -280,7 +243,6 @@ class ZAIProvider(Provider):
                 exchange_start = None
                 pending_assistant = None
                 return
-
             replacement: list[Message] = []
             content = pending_assistant.content or ""
             if content.strip():
@@ -300,11 +262,8 @@ class ZAIProvider(Provider):
                 pending_assistant = message
                 pending_tool_ids = {tool_call.id for tool_call in message.tool_calls}
                 continue
-
             if message.role == "tool":
-                if not pending_tool_ids:
-                    continue
-                if message.tool_call_id not in pending_tool_ids:
+                if not pending_tool_ids or message.tool_call_id not in pending_tool_ids:
                     continue
                 sanitized.append(message)
                 pending_tool_ids.remove(message.tool_call_id)
@@ -312,14 +271,12 @@ class ZAIProvider(Provider):
                     exchange_start = None
                     pending_assistant = None
                 continue
-
             if pending_tool_ids:
                 drop_pending_exchange()
             sanitized.append(message)
 
         if pending_tool_ids:
             drop_pending_exchange()
-
         return sanitized
 
     def _drop_empty_assistant_messages(self, messages: list[Message]) -> list[Message]:
@@ -344,13 +301,10 @@ class ZAIProvider(Provider):
         while index < len(messages) and messages[index].role == "system":
             system_messages.append(messages[index].model_copy(deep=True))
             index += 1
-
         if system_messages:
             recovered.extend(self._merge_leading_system_messages(system_messages))
-
         textual_messages = self._render_tool_messages_as_text(messages[index:])
         recovered.extend(self._ensure_recoverable_dialogue_shape(self._coalesce_text_messages(textual_messages)))
-
         return recovered
 
     def _render_tool_messages_as_text(self, messages: list[Message]) -> list[Message]:
@@ -374,37 +328,21 @@ class ZAIProvider(Provider):
                     rendered.append(Message.assistant(content))
                 index = lookahead
                 continue
-
-            if message.role in {"user", "assistant"}:
-                content = (message.content or "").strip()
-                if content:
-                    rendered.append(Message(role=message.role, content=content))
+            if message.role in {"user", "assistant"} and (message.content or "").strip():
+                rendered.append(Message(role=message.role, content=(message.content or "").strip()))
             index += 1
-
         return rendered
 
-    def _render_tool_exchange(
-        self,
-        assistant_message: Message,
-        tool_results: list[Message],
-    ) -> str:
+    def _render_tool_exchange(self, assistant_message: Message, tool_results: list[Message]) -> str:
         parts: list[str] = []
-        assistant_content = (assistant_message.content or "").strip()
-        if assistant_content:
+        if (assistant_content := (assistant_message.content or "").strip()):
             parts.append(assistant_content)
-
-        calls = []
-        for tool_call in assistant_message.tool_calls:
-            calls.append(f"{tool_call.function.name}({tool_call.function.arguments})")
+        calls = [f"{tool_call.function.name}({tool_call.function.arguments})" for tool_call in assistant_message.tool_calls]
         if calls:
             parts.append(f"[Assistant tool calls] {'; '.join(calls)}")
-
         for tool_message in tool_results:
-            tool_content = (tool_message.content or "").strip()
-            if not tool_content:
-                continue
-            parts.append(f"[Tool result] {self._truncate_text(tool_content, limit=1_200)}")
-
+            if (tool_content := (tool_message.content or "").strip()):
+                parts.append(f"[Tool result] {self._truncate_text(tool_content, limit=1_200)}")
         return "\n".join(parts).strip()
 
     def _coalesce_text_messages(self, messages: list[Message]) -> list[Message]:
@@ -412,9 +350,7 @@ class ZAIProvider(Provider):
         for message in messages:
             if coalesced and coalesced[-1].role == message.role and message.role != "system":
                 merged_content = "\n\n".join(
-                    part
-                    for part in [coalesced[-1].content or "", message.content or ""]
-                    if part
+                    part for part in [coalesced[-1].content or "", message.content or ""] if part
                 )
                 coalesced[-1] = Message(role=message.role, content=merged_content)
                 continue
@@ -429,10 +365,7 @@ class ZAIProvider(Provider):
         return messages
 
     def _recovery_prompt(self) -> str:
-        return (
-            "Continue from the prior context and answer the latest request using the tool "
-            "results already gathered."
-        )
+        return "Continue from the prior context and answer the latest request using the tool results already gathered."
 
     def _truncate_text(self, text: str, *, limit: int) -> str:
         normalized = " ".join(text.split())
@@ -443,14 +376,12 @@ class ZAIProvider(Provider):
     def _log_debug_event(self, event: str, **payload: object) -> None:
         if not self.config.debug_log_path:
             return
-
         record = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "event": event,
             "model": self.config.model,
             **payload,
         }
-
         try:
             path = Path(self.config.debug_log_path)
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -467,7 +398,6 @@ class ZAIProvider(Provider):
         value = response.headers.get("Retry-After")
         if not value:
             return None
-
         try:
             delay = float(value)
         except ValueError:
@@ -478,7 +408,6 @@ class ZAIProvider(Provider):
             if retry_at.tzinfo is None:
                 retry_at = retry_at.replace(tzinfo=timezone.utc)
             delay = (retry_at - datetime.now(timezone.utc)).total_seconds()
-
         return max(delay, 0.0)
 
     def _error_detail(self, response: httpx.Response) -> str:
@@ -486,16 +415,10 @@ class ZAIProvider(Provider):
             payload = response.json()
         except ValueError:
             payload = None
-
         if isinstance(payload, dict):
             error = payload.get("error")
-            if isinstance(error, dict):
-                message = error.get("message")
-                if isinstance(message, str) and message.strip():
-                    return message.strip()
+            if isinstance(error, dict) and isinstance(error.get("message"), str) and error["message"].strip():
+                return error["message"].strip()
             if isinstance(error, str) and error.strip():
                 return error.strip()
-
-        if response.reason_phrase:
-            return response.reason_phrase
-        return f"HTTP {response.status_code}"
+        return response.reason_phrase or f"HTTP {response.status_code}"

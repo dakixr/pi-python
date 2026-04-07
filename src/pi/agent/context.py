@@ -95,10 +95,7 @@ class ContextManager:
         kept = conversation[keep_start:]
         compacted = self._build_compacted_messages(system_messages, summarized, kept)
 
-        while (
-            self._estimate_chars(compacted) > self.max_provider_chars
-            and len(kept) > 1
-        ):
+        while self._estimate_chars(compacted) > self.max_provider_chars and len(kept) > 1:
             next_boundary = self._next_compaction_boundary(kept)
             if next_boundary is None:
                 break
@@ -109,9 +106,6 @@ class ContextManager:
         return compacted
 
     def _find_keep_start(self, messages: list[Message]) -> int:
-        if not messages:
-            return 0
-
         total = 0
         keep_start = len(messages) - 1
         for index in range(len(messages) - 1, -1, -1):
@@ -156,13 +150,12 @@ class ContextManager:
     def _render_message(self, message: Message) -> str:
         parts: list[str] = []
         if message.content:
-            label = message.role.capitalize()
-            parts.append(f"[{label}] {self._truncate_text(message.content, limit=600)}")
+            parts.append(f"[{message.role.capitalize()}] {self._truncate_text(message.content, limit=600)}")
         if message.tool_calls:
-            calls = []
-            for tool_call in message.tool_calls:
-                arguments = self._truncate_text(tool_call.function.arguments, limit=200)
-                calls.append(f"{tool_call.function.name}({arguments})")
+            calls = [
+                f"{tool_call.function.name}({self._truncate_text(tool_call.function.arguments, limit=200)})"
+                for tool_call in message.tool_calls
+            ]
             parts.append(f"[Assistant tool calls] {'; '.join(calls)}")
         if message.role == "tool" and not message.content:
             parts.append(f"[Tool {message.tool_call_id or 'result'}] (empty result)")
@@ -175,5 +168,4 @@ class ContextManager:
         return normalized[: limit - 3].rstrip() + "..."
 
     def _estimate_chars(self, messages: list[Message]) -> int:
-        payload = [message.to_api_dict() for message in messages]
-        return len(json.dumps(payload, ensure_ascii=False))
+        return len(json.dumps([message.to_api_dict() for message in messages], ensure_ascii=False))

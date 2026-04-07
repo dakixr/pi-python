@@ -1,7 +1,7 @@
 [project]
 name = "pi-python"
-version = "0.1.0"
-description = "Minimal Python agent loop inspired by pi"
+version = "0.2.0"
+description = "Python rewrite and compatibility layer for the pi monorepo"
 readme = "README.md"
 authors = [
     { name = "dakixr", email = "dakixr@gmail.com" }
@@ -14,7 +14,11 @@ dependencies = [
 ]
 
 [project.scripts]
-pi = "pi.cli.main:main"
+pi = "pi.coding_agent.cli:main"
+pi-core = "pi.cli.main:main"
+pi-ai = "pi.ai.cli:main"
+pi-pods = "pi.pods.cli:main"
+mom = "pi.mom.cli:main"
 
 [tool.uv]
 dev-dependencies = [
