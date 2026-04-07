@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import argparse
 from dataclasses import dataclass
 from pathlib import Path
+import sys
 
-from pi.upstream import get_upstream_version, resolve_upstream_installation, run_upstream_cli
+from pi import __version__
 
 PACKAGE_NAME = "mom"
 
@@ -27,18 +29,32 @@ def parse_sandbox(value: str) -> SandboxConfig:
 
 
 def run(argv: list[str] | None = None, *, repo: str | Path | None = None) -> int:
-    return run_upstream_cli(PACKAGE_NAME, argv, repo=repo)
+    del repo
+    parser = argparse.ArgumentParser(prog="mom", description="Local MOM sandbox helpers.")
+    parser.add_argument("--sandbox", help="Validate sandbox config such as 'host' or 'docker:name'.")
+    parser.add_argument("--version", action="store_true", help="Print package version and exit.")
+    args = parser.parse_args(list(argv or []))
+    if args.version:
+        print(__version__)
+        return 0
+    if args.sandbox:
+        sandbox = parse_sandbox(args.sandbox)
+        suffix = f":{sandbox.name}" if sandbox.name else ""
+        print(f"{sandbox.type}{suffix}")
+        return 0
+    parser.print_help(sys.stdout)
+    return 0
 
 
 def upstream_version(*, repo: str | Path | None = None) -> str:
-    return get_upstream_version(PACKAGE_NAME, repo=repo)
+    del repo
+    return __version__
 
 
 __all__ = [
     "PACKAGE_NAME",
     "SandboxConfig",
     "parse_sandbox",
-    "resolve_upstream_installation",
     "run",
     "upstream_version",
 ]

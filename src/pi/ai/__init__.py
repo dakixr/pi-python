@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import argparse
 from dataclasses import dataclass
 from pathlib import Path
+import sys
 
+from pi import __version__
 from pi.agent.providers.openai_compat import OpenAICompatibleConfig, OpenAICompatibleProvider
 from pi.agent.providers.zai import ZAIConfig, ZAIProvider
 from pi.ai.sdk import CompletionResult, Context, StreamEvent, Tool, complete, create_agent, run_task, stream
-from pi.upstream import get_upstream_version, resolve_upstream_installation, run_upstream_cli
 
 PACKAGE_NAME = "ai"
 
@@ -31,11 +33,28 @@ def list_oauth_providers() -> list[OAuthProviderInfo]:
 
 
 def run(argv: list[str] | None = None, *, repo: str | Path | None = None) -> int:
-    return run_upstream_cli(PACKAGE_NAME, argv, repo=repo)
+    del repo
+    parser = argparse.ArgumentParser(prog="pi-ai", description="Native Python AI helpers and provider metadata.")
+    subparsers = parser.add_subparsers(dest="command")
+    subparsers.add_parser("list", help="List supported OAuth provider metadata.")
+    subparsers.add_parser("version", help="Print package version.")
+    args = parser.parse_args(list(argv or []))
+
+    if args.command in {None, "list"}:
+        print("Available OAuth providers:\n")
+        for provider in OAUTH_PROVIDERS:
+            print(f"  {provider.id:<20} {provider.name}")
+        return 0
+    if args.command == "version":
+        print(__version__)
+        return 0
+    parser.print_help(sys.stderr)
+    return 1
 
 
 def upstream_version(*, repo: str | Path | None = None) -> str:
-    return get_upstream_version(PACKAGE_NAME, repo=repo)
+    del repo
+    return __version__
 
 
 __all__ = [
@@ -52,7 +71,6 @@ __all__ = [
     "complete",
     "create_agent",
     "list_oauth_providers",
-    "resolve_upstream_installation",
     "run",
     "run_task",
     "stream",

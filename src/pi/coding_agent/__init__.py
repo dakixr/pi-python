@@ -2,17 +2,20 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pi.upstream import get_upstream_version, resolve_upstream_installation, run_upstream_cli
+from pi import __version__
+from pi.cli.main import main as run_core_cli
 
 PACKAGE_NAME = "coding-agent"
 
 
 def run(argv: list[str] | None = None, *, repo: str | Path | None = None) -> int:
-    return run_upstream_cli(PACKAGE_NAME, argv, repo=repo)
+    del repo
+    return run_core_cli(list(argv or []))
 
 
 def upstream_version(*, repo: str | Path | None = None) -> str:
-    return get_upstream_version(PACKAGE_NAME, repo=repo)
+    del repo
+    return __version__
 
 
-__all__ = ["PACKAGE_NAME", "resolve_upstream_installation", "run", "upstream_version"]
+__all__ = ["PACKAGE_NAME", "run", "upstream_version"]

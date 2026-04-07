@@ -1,17 +1,11 @@
 [project]
 name = "pi-python"
 version = "0.2.0"
-description = "Python rewrite and compatibility layer for the pi monorepo"
+description = "Native Python pi agent toolkit with local CLI surfaces"
 readme = "README.md"
-authors = [
-    { name = "dakixr", email = "dakixr@gmail.com" }
-]
+authors = [{ name = "dakixr", email = "dakixr@gmail.com" }]
 requires-python = ">=3.12"
-dependencies = [
-    "httpx>=0.27,<0.29",
-    "pydantic>=2.9,<3.0",
-    "typer>=0.24.1",
-]
+dependencies = ["httpx>=0.27,<0.29", "pydantic>=2.9,<3.0", "typer>=0.24.1"]
 
 [project.scripts]
 pi = "pi.coding_agent.cli:main"
@@ -21,9 +15,7 @@ pi-pods = "pi.pods.cli:main"
 mom = "pi.mom.cli:main"
 
 [tool.uv]
-dev-dependencies = [
-    "pytest>=8.3",
-]
+dev-dependencies = ["pytest>=8.3"]
 
 [tool.uv.build-backend]
 module-name = "pi"

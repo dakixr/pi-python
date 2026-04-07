@@ -15,4 +15,4 @@ def test_port_status_by_package_indexes_statuses() -> None:
     indexed = port_status_by_package()
 
     assert indexed["agent"].mode == "native"
-    assert indexed["coding-agent"].mode == "wrapper"
+    assert indexed["coding-agent"].mode == "native-subset"

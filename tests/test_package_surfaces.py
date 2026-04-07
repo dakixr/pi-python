@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pi import __version__
 from pi.ai import list_oauth_providers
 from pi.mom import parse_sandbox
 from pi.pods import Pod, PodsConfig, PodsConfigStore, default_config_dir
@@ -63,17 +64,13 @@ def test_tui_helpers_handle_basic_text() -> None:
     assert wrap_text_with_ansi(styled, 5) == ["hello", "world"]
 
 
-def test_web_ui_get_paths_uses_repo_layout(tmp_path: Path) -> None:
-    repo = tmp_path / "pi-mono"
-    repo.mkdir()
-    (repo / "package.json").write_text("{}", encoding="utf-8")
-    package_dir = repo / "packages" / "web-ui"
-    package_dir.mkdir(parents=True)
-    (package_dir / "package.json").write_text('{"version":"3.4.5"}', encoding="utf-8")
+def test_web_ui_get_paths_uses_local_layout(tmp_path: Path) -> None:
+    package_dir = tmp_path / "web-ui"
+    package_dir.mkdir()
 
-    paths = get_paths(repo)
+    paths = get_paths(package_dir)
 
-    assert paths.package_dir == repo / "packages" / "web-ui"
-    assert paths.source_dir == repo / "packages" / "web-ui" / "src"
-    assert paths.dist_dir == repo / "packages" / "web-ui" / "dist"
-    assert web_ui_upstream_version(repo=repo) == "3.4.5"
+    assert paths.package_dir == package_dir
+    assert paths.source_dir == package_dir / "src"
+    assert paths.dist_dir == package_dir / "dist"
+    assert web_ui_upstream_version(repo=package_dir) == __version__

@@ -1,26 +1,24 @@
 # pi-python
 
-`pi-python` is a modern Python rewrite of the local `pi-mono` workspace with two layers:
+`pi-python` is a modern Python rewrite of the `pi` tooling stack with two layers:
 
 - a native Python agent/runtime/SDK under `pi.agent`, `pi.ai`, and `pi.cli`
-- compatibility entrypoints for upstream packages that still make more sense to delegate
-
-The compatibility layer targets `/tmp/pi-mono-aBS53I` by default, or `PI_MONO_REPO` when set.
+- compatibility entrypoints for package names that now stay within this repo
 
 ## Port Status
 
-This repo is intentionally explicit about what is native, hybrid, and still delegated.
+This repo is intentionally explicit about what is native and what remains a smaller local subset.
 
 | Package | Status | Notes |
 | --- | --- | --- |
 | `pi.agent` | Native | Python loop, tool execution, hooks, parallel tool mode, context compaction |
-| `pi.ai` / `pi-ai` | Hybrid | Native Python SDK surface plus upstream OAuth/provider CLI flows |
+| `pi.ai` / `pi-ai` | Hybrid | Native Python SDK surface plus a local provider metadata CLI |
 | `pi.cli` / `pi-core` | Native | Python one-shot and interactive CLI with JSONL-backed sessions |
-| `pi.coding_agent` / `pi` | Wrapper | Delegates to upstream TypeScript coding-agent |
-| `pi.pods` / `pi-pods` | Hybrid | Native config/store, upstream operational CLI |
-| `pi.mom` / `mom` | Hybrid | Native sandbox parsing, upstream bot/runtime |
+| `pi.coding_agent` / `pi` | Native subset | Local alias over the native core agent CLI |
+| `pi.pods` / `pi-pods` | Native subset | Native config/store and a local metadata CLI |
+| `pi.mom` / `mom` | Native subset | Native sandbox parsing and a local helper CLI |
 | `pi.tui` | Native subset | Python text helpers only |
-| `pi.web_ui` | Wrapper | Python helpers around upstream web UI assets |
+| `pi.web_ui` | Native subset | Local placeholder web UI asset helpers |
 
 For a machine-readable view, import `pi.porting.port_status()`.
 
@@ -77,13 +75,9 @@ uv run pi-pods --help
 uv run mom --help
 ```
 
-`pi`, `pi-ai`, `pi-pods`, and `mom` resolve the upstream repository, install npm dependencies on demand, and invoke the TypeScript entrypoint through `tsx`.
-
 ## Configuration
 
-- `PI_MONO_REPO`: override the upstream repo path
-- `PI_NODE_PACKAGE_MANAGER`: override the package manager, defaults to `npm`
-- `PI_AUTO_INSTALL_UPSTREAM=0`: disable automatic dependency installation for upstream wrappers
+- `PI_CONFIG_DIR`: override the config directory used by local pod/session helpers
 
 ## Development
 

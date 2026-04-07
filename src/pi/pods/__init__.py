@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import argparse
 from dataclasses import dataclass, field
 import json
 import os
 from pathlib import Path
+import sys
 
-from pi.upstream import get_upstream_version, resolve_upstream_installation, run_upstream_cli
+from pi import __version__
 
 PACKAGE_NAME = "pods"
 
@@ -101,11 +103,70 @@ def default_config_dir() -> Path:
 
 
 def run(argv: list[str] | None = None, *, repo: str | Path | None = None) -> int:
-    return run_upstream_cli(PACKAGE_NAME, argv, repo=repo)
+    del repo
+    parser = argparse.ArgumentParser(prog="pi-pods", description="Local pod configuration management.")
+    parser.add_argument("--config-dir", type=Path, default=default_config_dir(), help="Config directory for pods.json.")
+    subparsers = parser.add_subparsers(dest="command")
+
+    subparsers.add_parser("list", help="List configured pods.")
+
+    add_parser = subparsers.add_parser("add", help="Add or replace a pod entry.")
+    add_parser.add_argument("name")
+    add_parser.add_argument("ssh")
+    add_parser.add_argument("--models-path")
+    add_parser.add_argument("--vllm", default="release")
+
+    active_parser = subparsers.add_parser("active", help="Set or show the active pod.")
+    active_parser.add_argument("name", nargs="?")
+
+    remove_parser = subparsers.add_parser("remove", help="Remove a pod entry.")
+    remove_parser.add_argument("name")
+
+    args = parser.parse_args(list(argv or []))
+    store = PodsConfigStore(args.config_dir)
+    config = store.load()
+
+    if args.command is None or args.command == "list":
+        if not config.pods:
+            print("No pods configured.")
+            return 0
+        for name, pod in sorted(config.pods.items()):
+            marker = "*" if config.active_pod == name else " "
+            models_suffix = f" models={pod.models_path}" if pod.models_path else ""
+            print(f"{marker} {name} -> {pod.ssh}{models_suffix} vllm={pod.vllm}")
+        return 0
+
+    if args.command == "add":
+        config.add_pod(Pod(name=args.name, ssh=args.ssh, models_path=args.models_path, vllm=args.vllm))
+        store.save(config)
+        print(f"Saved pod {args.name}")
+        return 0
+
+    if args.command == "active":
+        if args.name is None:
+            active = config.get_active()
+            print(active.name if active is not None else "")
+            return 0
+        config.set_active(args.name)
+        store.save(config)
+        print(args.name)
+        return 0
+
+    if args.command == "remove":
+        config.pods.pop(args.name, None)
+        if config.active_pod == args.name:
+            config.active_pod = next(iter(sorted(config.pods)), None)
+        store.save(config)
+        print(f"Removed pod {args.name}")
+        return 0
+
+    parser.print_help(sys.stderr)
+    return 1
 
 
 def upstream_version(*, repo: str | Path | None = None) -> str:
-    return get_upstream_version(PACKAGE_NAME, repo=repo)
+    del repo
+    return __version__
 
 
 __all__ = [
@@ -114,7 +175,6 @@ __all__ = [
     "PodsConfig",
     "PodsConfigStore",
     "default_config_dir",
-    "resolve_upstream_installation",
     "run",
     "upstream_version",
 ]

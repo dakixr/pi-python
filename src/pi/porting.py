@@ -24,37 +24,37 @@ def port_status() -> list[PackagePortStatus]:
         ),
         PackagePortStatus(
             package="coding-agent",
-            mode="wrapper",
-            summary="Python CLI delegates to the upstream TypeScript coding-agent entrypoint.",
+            mode="native-subset",
+            summary="Python CLI now aliases the local native core agent instead of delegating to another repo.",
             gaps=(
-                "Interactive TUI, extensions, skills, sessions, and SDK remain upstream-driven.",
-                "Not a pure-Python implementation yet.",
+                "Interactive TUI, extensions, and session tree management are still not implemented natively.",
+                "The surface is intentionally smaller than the historical TypeScript product.",
             ),
         ),
         PackagePortStatus(
             package="ai",
             mode="hybrid",
-            summary="Native Python SDK surface for completions/agent embedding plus upstream delegation for OAuth/provider CLI flows.",
+            summary="Native Python SDK surface for completions/agent embedding plus a local provider metadata CLI.",
             gaps=(
                 "Only a subset of the upstream provider/auth surface is native today.",
-                "OAuth login flows remain upstream-driven.",
+                "OAuth login flows themselves are not implemented.",
             ),
         ),
         PackagePortStatus(
             package="pods",
-            mode="hybrid",
-            summary="Native Python config models with upstream delegation for the operational CLI.",
+            mode="native-subset",
+            summary="Native Python config models and a local CLI for managing pod metadata.",
             gaps=(
-                "SSH orchestration and vLLM lifecycle are still handled upstream.",
+                "SSH orchestration and vLLM lifecycle are not implemented.",
                 "No native pod execution engine yet.",
             ),
         ),
         PackagePortStatus(
             package="mom",
-            mode="hybrid",
-            summary="Native Python sandbox parsing with upstream delegation for the Slack bot runtime.",
+            mode="native-subset",
+            summary="Native Python sandbox parsing and a local helper CLI.",
             gaps=(
-                "Slack integration and agent runner remain upstream-driven.",
+                "Slack integration and long-running bot behavior are not implemented.",
                 "No native long-running bot runtime yet.",
             ),
         ),
@@ -69,11 +69,11 @@ def port_status() -> list[PackagePortStatus]:
         ),
         PackagePortStatus(
             package="web-ui",
-            mode="wrapper",
-            summary="Python helpers build and export the upstream web-ui package assets.",
+            mode="native-subset",
+            summary="Python helpers manage a local placeholder web-ui asset directory.",
             gaps=(
-                "No native Python web component implementation.",
-                "The browser UI remains upstream TypeScript code.",
+                "No native browser UI implementation exists.",
+                "The generated dist is a placeholder rather than a full app build.",
             ),
         ),
     ]

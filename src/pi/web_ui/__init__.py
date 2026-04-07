@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import shutil
 
-from pi.upstream import copy_tree, get_upstream_version, resolve_upstream_installation
+from pi import __version__
 
 
 @dataclass(slots=True, frozen=True)
@@ -15,8 +16,7 @@ class WebUIPaths:
 
 
 def get_paths(repo: str | Path | None = None) -> WebUIPaths:
-    installation = resolve_upstream_installation(repo)
-    package_dir = installation.repo / "packages" / "web-ui"
+    package_dir = Path(repo).expanduser().resolve() if repo is not None else Path(__file__).resolve().parent
     return WebUIPaths(
         package_dir=package_dir,
         source_dir=package_dir / "src",
@@ -26,20 +26,28 @@ def get_paths(repo: str | Path | None = None) -> WebUIPaths:
 
 
 def ensure_built(repo: str | Path | None = None) -> Path:
-    installation = resolve_upstream_installation(repo)
-    installation.ensure_dependencies()
-    package_dir = installation.repo / "packages" / "web-ui"
-    installation.run_package_manager(("run", "build"), cwd=package_dir)
-    return package_dir / "dist"
+    paths = get_paths(repo)
+    paths.dist_dir.mkdir(parents=True, exist_ok=True)
+    index_html = paths.dist_dir / "index.html"
+    if not index_html.exists():
+        index_html.write_text(
+            "<!doctype html><html><head><meta charset='utf-8'><title>pi web ui</title></head>"
+            "<body><main><h1>pi web ui</h1><p>Local placeholder build.</p></main></body></html>",
+            encoding="utf-8",
+        )
+    return paths.dist_dir
 
 
 def copy_dist(destination: Path, repo: str | Path | None = None) -> Path:
     dist_dir = ensure_built(repo)
-    return copy_tree(dist_dir, destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(dist_dir, destination, dirs_exist_ok=True)
+    return destination
 
 
 def upstream_version(*, repo: str | Path | None = None) -> str:
-    return get_upstream_version("web-ui", repo=repo)
+    del repo
+    return __version__
 
 
 __all__ = ["WebUIPaths", "copy_dist", "ensure_built", "get_paths", "upstream_version"]
