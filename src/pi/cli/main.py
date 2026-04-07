@@ -5,6 +5,9 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 import sys
+from queue import Empty, Queue
+from threading import Thread
+import time
 from typing import Annotated, Protocol
 
 import typer
@@ -14,7 +17,15 @@ from pi.agent.models import Message
 from pi.agent.providers.base import ProviderError
 from pi.agent.providers.zai import ZAIConfig, ZAIProvider
 from pi.agent.tools import ToolRegistry
-from pi.cli.render import OutputStream, StatusIndicator, build_console, print_agent_output, print_error, print_user_prompt
+from pi.cli.render import (
+    InteractiveRenderer,
+    OutputStream,
+    StatusIndicator,
+    build_console,
+    print_agent_output,
+    print_error,
+    print_user_prompt,
+)
 from pi.cli.session import SessionStore
 
 DEFAULT_SYSTEM_PROMPT = (
@@ -39,6 +50,16 @@ class AgentRunner(Protocol):
 
 class InputFunc(Protocol):
     def __call__(self, prompt: object = "", /) -> str: ...
+
+
+@dataclass(slots=True)
+class TurnSuccess:
+    result: AgentResult
+
+
+@dataclass(slots=True)
+class TurnFailure:
+    error: Exception
 
 
 @dataclass(slots=True)
@@ -96,28 +117,91 @@ def run_interactive_cli(
 ) -> int:
     messages = list(session_messages)
     stdout_console = build_console(stdout)
+    renderer = InteractiveRenderer(stderr)
+    input_queue: Queue[str | None] = Queue()
+    result_queue: Queue[TurnSuccess | TurnFailure] = Queue()
+    pending_prompts: list[str] = []
+    worker: Thread | None = None
+    shutdown_requested = False
+    input_closed = False
+
+    def read_input() -> None:
+        while True:
+            try:
+                raw = input_func(">>> ")
+            except (EOFError, StopIteration):
+                input_queue.put(None)
+                return
+            input_queue.put(raw.strip())
+
+    def start_turn(prompt: str) -> Thread:
+        history = list(messages)
+
+        def run_turn() -> None:
+            try:
+                result = execute_turn(agent, prompt, history, stderr=stderr, indicator=renderer)
+            except RUN_ERRORS as exc:
+                result_queue.put(TurnFailure(error=exc))
+                return
+            result_queue.put(TurnSuccess(result=result))
+
+        thread = Thread(target=run_turn, daemon=True)
+        thread.start()
+        return thread
+
+    Thread(target=read_input, daemon=True).start()
     if stdout_console.is_terminal:
         stdout_console.print("[bold cyan]pi[/bold cyan] interactive mode. Type `exit` or `quit` to leave.\n")
     while True:
         try:
-            prompt = input_func(">>> ").strip()
-        except EOFError:
-            stdout_console.print()
-            return 0
-        if not prompt:
-            continue
-        if prompt.lower() in {"exit", "quit"}:
-            return 0
-        print_user_prompt(stdout_console, prompt)
+            while True:
+                prompt = input_queue.get_nowait()
+                if prompt is None:
+                    input_closed = True
+                    shutdown_requested = True
+                    continue
+                if not prompt:
+                    continue
+                if prompt.lower() in {"exit", "quit"}:
+                    shutdown_requested = True
+                    continue
+                if worker is None and not pending_prompts:
+                    print_user_prompt(stdout_console, prompt)
+                    worker = start_turn(prompt)
+                else:
+                    pending_prompts.append(prompt)
+                    renderer.log_queued_message(prompt)
+                    renderer.set_queue_count(len(pending_prompts))
+        except Empty:
+            pass
+
         try:
-            result = execute_turn(agent, prompt, messages, stderr=stderr)
-        except RUN_ERRORS as exc:
-            print_error(stdout_console, str(exc))
-            continue
-        messages = result.messages
-        if session_store and args.session:
-            session_store.save(args.session, messages)
-        print_agent_output(stdout_console, result.output)
+            outcome = result_queue.get_nowait()
+        except Empty:
+            outcome = None
+
+        if outcome is not None:
+            worker = None
+            if isinstance(outcome, TurnFailure):
+                print_error(stdout_console, str(outcome.error))
+            else:
+                messages = outcome.result.messages
+                if session_store and args.session:
+                    session_store.save(args.session, messages)
+                print_agent_output(stdout_console, outcome.result.output)
+            renderer.set_queue_count(len(pending_prompts))
+            if pending_prompts:
+                next_prompt = pending_prompts.pop(0)
+                renderer.set_queue_count(len(pending_prompts))
+                print_user_prompt(stdout_console, next_prompt)
+                worker = start_turn(next_prompt)
+
+        if shutdown_requested and worker is None and not pending_prompts:
+            if input_closed:
+                stdout_console.print()
+            return 0
+
+        time.sleep(0.05)
 
 
 def run_cli(

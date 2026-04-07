@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from threading import Lock
 from typing import Protocol, TextIO, cast
 
 from rich.console import Console
@@ -106,11 +107,13 @@ class StatusIndicator:
         self._console = build_console(stream)
         self._status: Status | None = None
         self._last_message = "Thinking"
+        self._lock = Lock()
 
     def __enter__(self) -> "StatusIndicator":
-        if self._animate and self._console.is_terminal:
-            self._status = self._console.status("[bold cyan]Thinking[/bold cyan]", spinner="dots")
-            self._status.start()
+        with self._lock:
+            if self._animate and self._console.is_terminal:
+                self._status = self._console.status("[bold cyan]Thinking[/bold cyan]", spinner="dots")
+                self._status.start()
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
@@ -121,34 +124,56 @@ class StatusIndicator:
         if event == "model_start":
             self._update("Thinking")
             return
+        if event == "model_end":
+            self._update("Planning next step")
+            return
         if event == "tool_execution_start":
             tool_name = payload.get("tool_name", "tool")
             tool_arguments = payload.get("tool_arguments")
-            self._update(f"Running {format_tool_preview(str(tool_name), tool_arguments)}")
+            self._log_event_line("Tool", format_tool_preview(str(tool_name), tool_arguments), style="cyan")
+            self._update("Waiting on tool result")
             return
         if event == "tool_execution_end":
             tool_name = payload.get("tool_name", "tool")
             ok = payload.get("ok", False)
-            state = "Finished" if ok else "Failed"
-            self._update(f"{state} {tool_name}")
+            state = "done" if ok else "failed"
+            style = "green" if ok else "red"
+            self._log_event_line("Tool", f"{tool_name} {state}", style=style)
+            self._update("Thinking")
 
     def clear(self) -> None:
-        if self._status is not None:
-            self._status.stop()
-            self._status = None
+        with self._lock:
+            if self._status is not None:
+                self._status.stop()
+                self._status = None
 
     def set_queue_count(self, count: int) -> None:
         if count > 0:
             self._update(f"{self._last_message} [{count} queued]")
+            return
+        self._update(self._last_message.split(" [", 1)[0])
 
     def log_queued_message(self, text: str) -> None:
-        if self._console.is_terminal:
-            self._console.print(f"[dim]Queued:[/dim] {truncate_cli_text(text, 72)}")
+        self._log_event_line("Queued", truncate_cli_text(text, 72), style="magenta")
 
     def _update(self, message: str) -> None:
-        self._last_message = message
-        if self._status is not None:
-            self._status.update(f"[bold cyan]{message}[/bold cyan]")
+        with self._lock:
+            self._last_message = message
+            if self._status is not None:
+                self._status.update(f"[bold cyan]{message}[/bold cyan]")
+
+    def _log_event_line(self, label: str, text: str, *, style: str) -> None:
+        with self._lock:
+            if not self._console.is_terminal:
+                return
+            had_status = self._status is not None
+            if had_status:
+                assert self._status is not None
+                self._status.stop()
+            self._console.print(f"[bold {style}]{label}[/bold {style}] {text}")
+            if had_status and self._animate:
+                self._status = self._console.status(f"[bold cyan]{self._last_message}[/bold cyan]", spinner="dots")
+                self._status.start()
 
 
 class InteractiveRenderer(StatusIndicator):

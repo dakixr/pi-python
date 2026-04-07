@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import io
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+import time
 
 from pi.agent.loop import AgentResult
 from pi.agent.models import Message
@@ -22,6 +24,11 @@ class FakeAgent:
         conversation.append(Message.user(prompt))
         conversation.append(Message.assistant(output))
         return AgentResult(output=output, messages=conversation, iterations=1)
+
+
+class CaptureStream(io.StringIO):
+    def isatty(self) -> bool:
+        return False
 
 
 def test_cli_runs_one_shot_prompt(capsys) -> None:
@@ -77,3 +84,44 @@ def test_typer_entrypoint_invokes_cli() -> None:
     assert result.exit_code == 0
     assert "Usage:" in result.stdout
     assert "--max-iterations" in result.stdout
+
+
+def test_interactive_cli_accepts_queued_prompts_while_busy(tmp_path: Path) -> None:
+    @dataclass
+    class SlowAgent:
+        seen_history_lengths: list[int] = field(default_factory=list)
+
+        def run(self, prompt: str, messages: list[Message] | None = None, *, on_event=None) -> AgentResult:
+            self.seen_history_lengths.append(len(messages or []))
+            if on_event is not None:
+                on_event("model_start", {"iteration": 1})
+                on_event("tool_execution_start", {"tool_name": "bash", "tool_arguments": '{"command":"sleep 0.1"}'})
+            time.sleep(0.1)
+            if on_event is not None:
+                on_event("tool_execution_end", {"tool_name": "bash", "ok": True})
+            conversation = list(messages or [])
+            conversation.append(Message.user(prompt))
+            conversation.append(Message.assistant(f"done {prompt}"))
+            return AgentResult(output=f"done {prompt}", messages=conversation, iterations=1)
+
+    prompts = iter(["first", "second", "quit"])
+
+    def fake_input(_: object = "") -> str:
+        return next(prompts)
+
+    stdout = CaptureStream()
+    stderr = CaptureStream()
+    agent = SlowAgent()
+
+    exit_code = run_cli(
+        CLIArgs(root=str(tmp_path)),
+        agent=agent,
+        input_func=fake_input,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 0
+    assert "done first" in stdout.getvalue()
+    assert "done second" in stdout.getvalue()
+    assert agent.seen_history_lengths == [0, 2]
