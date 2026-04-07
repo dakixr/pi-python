@@ -25,6 +25,11 @@ from pi.cli.render import (
     build_console,
     print_agent_output,
     print_error,
+    print_scrollback_agent,
+    print_scrollback_error,
+    print_scrollback_queue,
+    print_scrollback_tool,
+    print_scrollback_user,
     print_user_prompt,
 )
 from pi.cli.session import SessionStore
@@ -83,10 +88,14 @@ class PromptToolkitLiveRenderer:
     def __init__(
         self,
         *,
-        emit_line: Callable[[str], None],
+        emit_tool: Callable[[str, bool], None],
+        emit_agent: Callable[[str], None],
+        emit_error: Callable[[str], None],
         set_status: Callable[[str], None],
     ) -> None:
-        self._emit_line = emit_line
+        self._emit_tool = emit_tool
+        self._emit_agent = emit_agent
+        self._emit_error = emit_error
         self._set_status = set_status
 
     def __enter__(self) -> "PromptToolkitLiveRenderer":
@@ -109,7 +118,7 @@ class PromptToolkitLiveRenderer:
         if event == "tool_execution_start":
             tool_name = payload.get("tool_name", "tool")
             tool_arguments = payload.get("tool_arguments")
-            self._emit_line(f"tool {format_tool_preview(str(tool_name), tool_arguments)}")
+            self._emit_tool(format_tool_preview(str(tool_name), tool_arguments), False)
             self._set_status("Waiting on tool result")
             return
         if event == "tool_execution_end":
@@ -121,19 +130,16 @@ class PromptToolkitLiveRenderer:
                     raw_error = result.get("error")
                     if isinstance(raw_error, str) and raw_error.strip():
                         error_text = truncate_cli_text(raw_error, 120)
-                self._emit_line(f"tool! {error_text or 'The tool returned an error.'}")
+                self._emit_tool(error_text or "The tool returned an error.", True)
                 self._set_status("Handling tool failure")
                 return
             self._set_status("Thinking")
 
     def print_agent_output(self, text: str) -> None:
-        lines = text.rstrip().splitlines() or ["(empty)"]
-        self._emit_line(f"pi {lines[0]}")
-        for line in lines[1:]:
-            self._emit_line(f"   {line}")
+        self._emit_agent(text)
 
     def print_error(self, message: str) -> None:
-        self._emit_line(f"error {message}")
+        self._emit_error(message)
 
 
 def build_agent_from_args(args: CLIArgs) -> Agent:
@@ -316,6 +322,7 @@ def run_prompt_toolkit_cli(
     spinner_frames = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
     state_lock = Lock()
     prompt_session = PromptSession()
+    scrollback_console = build_console(sys.stdout)
 
     def update_status(message: str) -> None:
         nonlocal status_message
@@ -330,19 +337,20 @@ def run_prompt_toolkit_cli(
             return
         loop.call_soon_threadsafe(app.invalidate)
 
-    def print_transcript_line(text: str) -> None:
-        def emit() -> None:
-            print(text)
-
+    def run_in_scrollback(render: Callable[[], None]) -> None:
         app = prompt_session.app
         loop = app.loop
         if loop is None:
-            emit()
+            render()
             return
-        loop.call_soon_threadsafe(lambda: run_in_terminal(emit))
+        loop.call_soon_threadsafe(lambda: run_in_terminal(render))
 
     renderer = PromptToolkitLiveRenderer(
-        emit_line=print_transcript_line,
+        emit_tool=lambda text, failed: run_in_scrollback(
+            lambda: print_scrollback_tool(scrollback_console, text, failed=failed)
+        ),
+        emit_agent=lambda text: run_in_scrollback(lambda: print_scrollback_agent(scrollback_console, text)),
+        emit_error=lambda text: run_in_scrollback(lambda: print_scrollback_error(scrollback_console, text)),
         set_status=update_status,
     )
 
@@ -444,10 +452,11 @@ def run_prompt_toolkit_cli(
                 queued_position = len(pending_prompts)
             else:
                 queued_position = 0
+        run_in_scrollback(lambda: print_scrollback_user(scrollback_console, prompt))
         if idle:
             start_turn(prompt)
             continue
-        print_transcript_line(f"queued {queued_position}: {prompt}")
+        run_in_scrollback(lambda: print_scrollback_queue(scrollback_console, queued_position, prompt))
         invalidate_prompt()
 
 

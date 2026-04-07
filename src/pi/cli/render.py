@@ -100,6 +100,49 @@ def print_error(console: Console, message: str) -> None:
     console.print(f"Error: {message}")
 
 
+def print_scrollback_user(console: Console, prompt: str) -> None:
+    if console.is_terminal:
+        console.print()
+        console.print("[bold cyan]user[/bold cyan]")
+        console.print(prompt.rstrip() or "(empty)")
+        return
+    console.print(f"\nuser\n{prompt.rstrip() or '(empty)'}")
+
+
+def print_scrollback_agent(console: Console, output: str) -> None:
+    if console.is_terminal:
+        console.print()
+        console.print("[bold green]pi[/bold green]")
+        for line in output.rstrip().splitlines() or ["(empty)"]:
+            console.print(line)
+        return
+    console.print(f"\npi\n{output.rstrip() or '(empty)'}")
+
+
+def print_scrollback_tool(console: Console, text: str, *, failed: bool = False) -> None:
+    if console.is_terminal:
+        label = "tool!" if failed else "tool"
+        style = "red" if failed else "bright_cyan"
+        console.print(f"[bold {style}]{label}[/bold {style}] {text}")
+        return
+    prefix = "tool!" if failed else "tool"
+    console.print(f"{prefix} {text}")
+
+
+def print_scrollback_queue(console: Console, index: int, prompt: str) -> None:
+    if console.is_terminal:
+        console.print(f"[bold yellow]queued {index}[/bold yellow] {prompt}")
+        return
+    console.print(f"queued {index}: {prompt}")
+
+
+def print_scrollback_error(console: Console, message: str) -> None:
+    if console.is_terminal:
+        console.print(f"[bold red]error[/bold red] {message}")
+        return
+    console.print(f"error {message}")
+
+
 class StatusIndicator:
     def __init__(self, stream: OutputStream, *, animate: bool = True) -> None:
         self._stream = stream
