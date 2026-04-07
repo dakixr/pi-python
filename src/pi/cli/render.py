@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import json
-from typing import Protocol
+from typing import Protocol, TextIO, cast
+
+from rich.console import Console
+from rich.panel import Panel
+from rich.status import Status
+from rich.text import Text
 
 
 def truncate_cli_text(text: str, limit: int) -> str:
@@ -36,8 +41,8 @@ def format_tool_preview(tool_name: str, raw_arguments: object) -> str:
     elif tool_name == "bash":
         preview = first_string(arguments, "command")
     if preview:
-        return f"tool {tool_name} {truncate_cli_text(preview, 72)}"
-    return f"tool {tool_name}"
+        return f"{tool_name} {truncate_cli_text(preview, 72)}"
+    return tool_name
 
 
 def format_user_separator(prompt: str) -> str:
@@ -50,33 +55,102 @@ class OutputStream(Protocol):
     def isatty(self) -> bool: ...
 
 
+def build_console(stream: OutputStream) -> Console:
+    is_tty = stream.isatty()
+    return Console(
+        file=cast(TextIO, stream),
+        force_terminal=is_tty,
+        color_system="auto" if is_tty else None,
+        soft_wrap=True,
+        highlight=False,
+    )
+
+
+def print_user_prompt(console: Console, prompt: str) -> None:
+    if console.is_terminal:
+        panel = Panel(
+            Text(prompt.rstrip(), style="bold white"),
+            title="[bold cyan]User[/bold cyan]",
+            border_style="cyan",
+            expand=True,
+        )
+        console.print(panel)
+        return
+    console.print(format_user_separator(prompt))
+
+
+def print_agent_output(console: Console, output: str) -> None:
+    if console.is_terminal:
+        panel = Panel(
+            Text(output.rstrip() or "(empty)", style="white"),
+            title="[bold green]Pi[/bold green]",
+            border_style="green",
+            expand=True,
+        )
+        console.print(panel)
+        return
+    console.print(output)
+
+
+def print_error(console: Console, message: str) -> None:
+    if console.is_terminal:
+        console.print(f"[bold red]Error:[/bold red] {message}")
+        return
+    console.print(f"Error: {message}")
+
+
 class StatusIndicator:
     def __init__(self, stream: OutputStream, *, animate: bool = True) -> None:
         self._stream = stream
         self._animate = animate
+        self._console = build_console(stream)
+        self._status: Status | None = None
+        self._last_message = "Thinking"
 
     def __enter__(self) -> "StatusIndicator":
+        if self._animate and self._console.is_terminal:
+            self._status = self._console.status("[bold cyan]Thinking[/bold cyan]", spinner="dots")
+            self._status.start()
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self.clear()
         return None
 
     def handle_event(self, event: str, payload: dict[str, object]) -> None:
-        return None
+        if event == "model_start":
+            self._update("Thinking")
+            return
+        if event == "tool_execution_start":
+            tool_name = payload.get("tool_name", "tool")
+            tool_arguments = payload.get("tool_arguments")
+            self._update(f"Running {format_tool_preview(str(tool_name), tool_arguments)}")
+            return
+        if event == "tool_execution_end":
+            tool_name = payload.get("tool_name", "tool")
+            ok = payload.get("ok", False)
+            state = "Finished" if ok else "Failed"
+            self._update(f"{state} {tool_name}")
 
     def clear(self) -> None:
-        return None
+        if self._status is not None:
+            self._status.stop()
+            self._status = None
 
     def set_queue_count(self, count: int) -> None:
-        return None
+        if count > 0:
+            self._update(f"{self._last_message} [{count} queued]")
 
     def log_queued_message(self, text: str) -> None:
-        if getattr(self._stream, "isatty", lambda: False)():
-            self._stream.write(f"queued {truncate_cli_text(text, 72)}\n")
-            self._stream.flush()
+        if self._console.is_terminal:
+            self._console.print(f"[dim]Queued:[/dim] {truncate_cli_text(text, 72)}")
+
+    def _update(self, message: str) -> None:
+        self._last_message = message
+        if self._status is not None:
+            self._status.update(f"[bold cyan]{message}[/bold cyan]")
 
 
 class InteractiveRenderer(StatusIndicator):
     def print_message(self, text: str) -> None:
-        self._stream.write(f"{text}\n")
-        self._stream.flush()
+        print_agent_output(self._console, text)

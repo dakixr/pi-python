@@ -14,7 +14,7 @@ from pi.agent.models import Message
 from pi.agent.providers.base import ProviderError
 from pi.agent.providers.zai import ZAIConfig, ZAIProvider
 from pi.agent.tools import ToolRegistry
-from pi.cli.render import OutputStream, StatusIndicator, format_user_separator
+from pi.cli.render import OutputStream, StatusIndicator, build_console, print_agent_output, print_error, print_user_prompt
 from pi.cli.session import SessionStore
 
 DEFAULT_SYSTEM_PROMPT = (
@@ -91,29 +91,33 @@ def run_interactive_cli(
     *,
     session_store: SessionStore | None,
     input_func: InputFunc,
+    stdout: OutputStream,
     stderr: OutputStream,
 ) -> int:
     messages = list(session_messages)
+    stdout_console = build_console(stdout)
+    if stdout_console.is_terminal:
+        stdout_console.print("[bold cyan]pi[/bold cyan] interactive mode. Type `exit` or `quit` to leave.\n")
     while True:
         try:
             prompt = input_func(">>> ").strip()
         except EOFError:
-            print()
+            stdout_console.print()
             return 0
         if not prompt:
             continue
         if prompt.lower() in {"exit", "quit"}:
             return 0
-        print(format_user_separator(prompt))
+        print_user_prompt(stdout_console, prompt)
         try:
             result = execute_turn(agent, prompt, messages, stderr=stderr)
         except RUN_ERRORS as exc:
-            print(f"Error: {exc}", file=stderr)
+            print_error(stdout_console, str(exc))
             continue
         messages = result.messages
         if session_store and args.session:
             session_store.save(args.session, messages)
-        print(result.output)
+        print_agent_output(stdout_console, result.output)
 
 
 def run_cli(
@@ -121,25 +125,29 @@ def run_cli(
     agent: AgentRunner | None = None,
     *,
     input_func: InputFunc = input,
+    stdout: OutputStream | None = None,
     stderr: OutputStream | None = None,
 ) -> int:
-    stream = stderr or sys.stderr
+    error_stream = stderr or sys.stderr
+    output_stream = stdout or sys.stdout
+    error_console = build_console(error_stream)
+    output_console = build_console(output_stream)
     try:
         active_agent = agent or build_agent_from_args(args)
     except ValueError as exc:
-        print(f"Error: {exc}", file=stream)
+        print_error(error_console, str(exc))
         return 1
     session_store = SessionStore(root=Path(args.root)) if args.session else None
     session_messages = session_store.load(args.session).messages if session_store and args.session else []
     if args.prompt:
         try:
-            result = execute_turn(active_agent, args.prompt, session_messages, stderr=stream)
+            result = execute_turn(active_agent, args.prompt, session_messages, stderr=error_stream)
         except RUN_ERRORS as exc:
-            print(f"Error: {exc}", file=stream)
+            print_error(error_console, str(exc))
             return 1
         if session_store and args.session:
             session_store.save(args.session, result.messages)
-        print(result.output)
+        print_agent_output(output_console, result.output)
         return 0
     return run_interactive_cli(
         args,
@@ -147,11 +155,16 @@ def run_cli(
         session_messages,
         session_store=session_store,
         input_func=input_func,
-        stderr=stream,
+        stdout=output_stream,
+        stderr=error_stream,
     )
 
-
-app = typer.Typer(add_completion=False, help="Minimal Python coding agent CLI.")
+app = typer.Typer(
+    add_completion=False,
+    help="Native Python coding agent CLI.",
+    rich_markup_mode="rich",
+    no_args_is_help=False,
+)
 
 
 @app.command()
@@ -159,7 +172,7 @@ def cli(
     prompt: Annotated[str | None, typer.Option("--prompt", help="Run one prompt and exit.")] = None,
     session: Annotated[
         str | None,
-        typer.Option("--session", help="Persist conversation under .pi/sessions/<name>.json."),
+        typer.Option("--session", help="Persist conversation under [bold].pi/sessions/<name>.json[/bold]."),
     ] = None,
     api_key: Annotated[str, typer.Option("--api-key", envvar="ZAI_API_KEY", help="Z.AI API key.")] = "",
     model: Annotated[str, typer.Option("--model", help="Model name to send to the provider.")] = DEFAULT_MODEL,
@@ -188,7 +201,7 @@ def cli(
 
 def main(argv: list[str] | None = None) -> int:
     try:
-        app(args=argv, prog_name="pi-core", standalone_mode=False)
+        app(args=argv, prog_name="pi", standalone_mode=False)
     except typer.Exit as exc:
         return int(exc.exit_code)
     return 0
