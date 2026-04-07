@@ -1,36 +1,22 @@
 # pi-python
 
-`pi-python` is a modern Python rewrite of the `pi` tooling stack with two layers:
+`pi-python` is a focused native Python agent/runtime/SDK.
 
-- a native Python agent/runtime/SDK under `pi.agent`, `pi.ai`, and `pi.cli`
-- compatibility entrypoints for package names that now stay within this repo
+The codebase is intentionally narrow:
 
-## Port Status
+- `pi.agent`: agent loop, context handling, tool runtime, and providers
+- `pi.ai`: embeddable Python SDK helpers and the `pi-ai` metadata CLI
+- `pi.cli`: local one-shot and interactive CLI, exported as `pi`
 
-This repo is intentionally explicit about what is native and what remains a smaller local subset.
+## Native Surface
 
-| Package | Status | Notes |
-| --- | --- | --- |
-| `pi.agent` | Native | Python loop, tool execution, hooks, parallel tool mode, context compaction |
-| `pi.ai` / `pi-ai` | Hybrid | Native Python SDK surface plus a local provider metadata CLI |
-| `pi.cli` / `pi-core` | Native | Python one-shot and interactive CLI with JSONL-backed sessions |
-| `pi.coding_agent` / `pi` | Native subset | Local alias over the native core agent CLI |
-| `pi.pods` / `pi-pods` | Native subset | Native config/store and a local metadata CLI |
-| `pi.mom` / `mom` | Native subset | Native sandbox parsing and a local helper CLI |
-| `pi.tui` | Native subset | Python text helpers only |
-| `pi.web_ui` | Native subset | Local placeholder web UI asset helpers |
-
-For a machine-readable view, import `pi.porting.port_status()`.
-
-## Native Python Surface
-
-The native core now covers the pieces that are actually useful to embed from Python:
+The base includes:
 
 - `pi.agent.Agent` with sequential or parallel tool execution
 - `before_tool_call` and `after_tool_call` hooks
 - `ToolRegistry` plus native `read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls`
-- shared truncation semantics closer to upstream: `2000` lines or `50KB`
-- JSONL-backed session persistence with compatibility snapshots
+- shared truncation semantics: `2000` lines or `50KB`
+- JSONL-backed session persistence
 - `pi.ai.complete(...)`, `pi.ai.stream(...)`, `pi.ai.create_agent(...)`, and `pi.ai.run_task(...)`
 - provider support for native `ZAIProvider` and a generic `OpenAICompatibleProvider`
 
@@ -52,36 +38,17 @@ result = run_task(
 print(result.output)
 ```
 
-For direct completion-style usage without the agent loop:
-
-```python
-from pi.ai import Context, complete
-
-response = complete(
-    provider=provider,
-    context=Context.from_prompt("Summarize this repository", system_prompt="Be concise."),
-)
-
-print(response.output)
-```
-
 ## Entry Points
 
 ```bash
 uv run pi --help
-uv run pi-core --help
-uv run pi-ai --help
-uv run pi-pods --help
-uv run mom --help
+uv run pi-ai list
 ```
-
-## Configuration
-
-- `PI_CONFIG_DIR`: override the config directory used by local pod/session helpers
 
 ## Development
 
 ```bash
 uv sync --dev
+uvx pyright
 uv run pytest
 ```

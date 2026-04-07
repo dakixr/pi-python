@@ -1,18 +1,15 @@
 [project]
 name = "pi-python"
 version = "0.2.0"
-description = "Native Python pi agent toolkit with local CLI surfaces"
+description = "Native Python pi agent toolkit"
 readme = "README.md"
 authors = [{ name = "dakixr", email = "dakixr@gmail.com" }]
 requires-python = ">=3.12"
 dependencies = ["httpx>=0.27,<0.29", "pydantic>=2.9,<3.0", "typer>=0.24.1"]
 
 [project.scripts]
-pi = "pi.coding_agent.cli:main"
-pi-core = "pi.cli.main:main"
+pi = "pi.cli.main:main"
 pi-ai = "pi.ai.cli:main"
-pi-pods = "pi.pods.cli:main"
-mom = "pi.mom.cli:main"
 
 [tool.uv]
 dev-dependencies = ["pytest>=8.3"]
