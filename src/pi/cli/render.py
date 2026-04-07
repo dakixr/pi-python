@@ -100,15 +100,6 @@ def print_error(console: Console, message: str) -> None:
     console.print(f"Error: {message}")
 
 
-def print_scrollback_user(console: Console, prompt: str) -> None:
-    if console.is_terminal:
-        console.print()
-        console.print("[bold cyan]user[/bold cyan]")
-        console.print(prompt.rstrip() or "(empty)")
-        return
-    console.print(f"\nuser\n{prompt.rstrip() or '(empty)'}")
-
-
 def print_scrollback_agent(console: Console, output: str) -> None:
     if console.is_terminal:
         console.print()

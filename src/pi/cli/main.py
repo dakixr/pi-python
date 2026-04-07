@@ -29,7 +29,6 @@ from pi.cli.render import (
     print_scrollback_error,
     print_scrollback_queue,
     print_scrollback_tool,
-    print_scrollback_user,
     print_user_prompt,
 )
 from pi.cli.session import SessionStore
@@ -452,7 +451,6 @@ def run_prompt_toolkit_cli(
                 queued_position = len(pending_prompts)
             else:
                 queued_position = 0
-        run_in_scrollback(lambda: print_scrollback_user(scrollback_console, prompt))
         if idle:
             start_turn(prompt)
             continue
