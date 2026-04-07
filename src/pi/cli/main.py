@@ -306,9 +306,12 @@ def run_prompt_toolkit_cli(
 ) -> int:
     from prompt_toolkit.application import Application
     from prompt_toolkit.document import Document
+    from prompt_toolkit.filters import Condition
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.layout import HSplit, Layout, Window
+    from prompt_toolkit.layout.containers import ConditionalContainer
     from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.layout.dimension import Dimension
     from prompt_toolkit.styles import Style
     from prompt_toolkit.widgets import TextArea
 
@@ -319,13 +322,12 @@ def run_prompt_toolkit_cli(
     status_message = "Ready"
     spinner_index = 0
     spinner_frames = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
-    transcript_lines = ["pi interactive mode. Type `exit` or `quit` to leave.", ""]
     ui_thread_id = get_ident()
     app: Application[int]
 
     transcript = TextArea(
-        text="",
-        read_only=True,
+        text="pi interactive mode. Type `exit` or `quit` to leave.\n",
+        read_only=False,
         focusable=False,
         scrollbar=True,
         wrap_lines=True,
@@ -339,10 +341,6 @@ def run_prompt_toolkit_cli(
         style="class:input",
     )
 
-    def sync_transcript() -> None:
-        text = "\n".join(transcript_lines).rstrip() + "\n"
-        transcript.buffer.set_document(Document(text, cursor_position=len(text)), bypass_readonly=True)
-
     def dispatch_ui(callback: Callable[[], None]) -> None:
         loop = app.loop
         if get_ident() == ui_thread_id or loop is None:
@@ -352,8 +350,9 @@ def run_prompt_toolkit_cli(
 
     def append_line(text: str) -> None:
         def update() -> None:
-            transcript_lines.append(text)
-            sync_transcript()
+            if transcript.buffer.text and not transcript.buffer.text.endswith("\n"):
+                transcript.buffer.insert_text("\n")
+            transcript.buffer.insert_text(f"{text}\n")
             app.invalidate()
 
         dispatch_ui(update)
@@ -405,8 +404,8 @@ def run_prompt_toolkit_cli(
         if prompt.lower() in {"exit", "quit"}:
             request_exit()
             return
-        append_line(f">>> {prompt}")
         if worker is None and not pending_prompts:
+            append_line(f">>> {prompt}")
             worker = start_turn(prompt)
             return
         pending_prompts.append(prompt)
@@ -424,6 +423,7 @@ def run_prompt_toolkit_cli(
             renderer.print_agent_output(outcome.result.output)
         if pending_prompts:
             next_prompt = pending_prompts.pop(0)
+            append_line(f">>> {next_prompt}")
             worker = start_turn(next_prompt)
         elif shutdown_requested:
             app.exit(result=0)
@@ -443,6 +443,17 @@ def run_prompt_toolkit_cli(
             return [("class:status.queued", f" queued | {len(pending_prompts)} waiting ")]
         return [("class:status.idle", f" {status_message} ")]
 
+    def get_queue_fragments() -> list[tuple[str, str]]:
+        fragments: list[tuple[str, str]] = []
+        preview_prompts = pending_prompts[:3]
+        for index, prompt in enumerate(preview_prompts, start=1):
+            fragments.append(("class:queue.label", f" queued {index} "))
+            fragments.append(("class:queue.text", f" {prompt}\n"))
+        remaining = len(pending_prompts) - len(preview_prompts)
+        if remaining > 0:
+            fragments.append(("class:queue.more", f" +{remaining} more queued\n"))
+        return fragments or [("", "")]
+
     kb = KeyBindings()
 
     @kb.add("enter")
@@ -459,6 +470,14 @@ def run_prompt_toolkit_cli(
             HSplit(
                 [
                     transcript,
+                    ConditionalContainer(
+                        Window(
+                            height=Dimension(min=1, max=3),
+                            content=FormattedTextControl(get_queue_fragments),
+                            style="class:queue",
+                        ),
+                        filter=Condition(lambda: bool(pending_prompts)),
+                    ),
                     Window(height=1, content=FormattedTextControl(get_status_fragments)),
                     input_field,
                 ]
@@ -473,6 +492,10 @@ def run_prompt_toolkit_cli(
             {
                 "transcript": "fg:#d8dee9 bg:#2b303b",
                 "input": "fg:#eceff4 bg:#2b303b",
+                "queue": "bg:#3b4252",
+                "queue.label": "fg:#2e3440 bg:#ebcb8b bold",
+                "queue.text": "fg:#eceff4 bg:#3b4252",
+                "queue.more": "fg:#88c0d0 bg:#3b4252 italic",
                 "status.busy": "fg:#eceff4 bg:#4c566a bold",
                 "status.queued": "fg:#2e3440 bg:#ebcb8b bold",
                 "status.idle": "fg:#2e3440 bg:#a3be8c bold",
@@ -480,7 +503,6 @@ def run_prompt_toolkit_cli(
         ),
     )
 
-    sync_transcript()
     return app.run()
 
 
