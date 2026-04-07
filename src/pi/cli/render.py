@@ -180,6 +180,92 @@ class StatusIndicator:
                 self._status.start()
 
 
-class InteractiveRenderer(StatusIndicator):
-    def print_message(self, text: str) -> None:
-        print_agent_output(self._console, text)
+class InteractiveRenderer:
+    _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+
+    def __init__(self, stream: OutputStream) -> None:
+        self._console = build_console(stream)
+        self._lock = Lock()
+        self._status_message = "Ready"
+        self._queue_count = 0
+        self._turn_active = False
+        self._spinner_index = 0
+
+    def __enter__(self) -> "InteractiveRenderer":
+        with self._lock:
+            self._turn_active = True
+            self._status_message = "Thinking"
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        with self._lock:
+            self._turn_active = False
+            self._status_message = "Ready"
+        return None
+
+    def handle_event(self, event: str, payload: dict[str, object]) -> None:
+        if event == "model_start":
+            self._set_status("Thinking")
+            return
+        if event == "model_end":
+            self._set_status("Planning next step")
+            return
+        if event == "tool_execution_start":
+            tool_name = payload.get("tool_name", "tool")
+            tool_arguments = payload.get("tool_arguments")
+            self._print_labeled_line("tool", format_tool_preview(str(tool_name), tool_arguments), style="cyan")
+            self._set_status("Waiting on tool result")
+            return
+        if event == "tool_execution_end":
+            ok = payload.get("ok", False)
+            if not ok:
+                result = payload.get("result")
+                error_text = None
+                if isinstance(result, dict):
+                    raw_error = result.get("error")
+                    if isinstance(raw_error, str) and raw_error.strip():
+                        error_text = truncate_cli_text(raw_error, 120)
+                self._print_labeled_line(
+                    "tool!",
+                    error_text or "The tool returned an error.",
+                    style="red",
+                )
+            self._set_status("Thinking" if ok else "Handling tool failure")
+
+    def set_queue_count(self, count: int) -> None:
+        with self._lock:
+            self._queue_count = count
+
+    def toolbar_text(self) -> str:
+        with self._lock:
+            queue_suffix = f" | {self._queue_count} queued" if self._queue_count else ""
+            if self._turn_active:
+                frame = self._SPINNER_FRAMES[self._spinner_index % len(self._SPINNER_FRAMES)]
+                self._spinner_index += 1
+                return f"{frame} {self._status_message}{queue_suffix}"
+            if self._queue_count:
+                return f"Queued{queue_suffix}"
+            return self._status_message
+
+    def print_intro(self) -> None:
+        self._console.print("[bold cyan]pi[/bold cyan] interactive mode. Type `exit` or `quit` to leave.\n")
+
+    def print_agent_output(self, text: str) -> None:
+        self._print_block("pi", text or "(empty)", style="green")
+
+    def print_error(self, message: str) -> None:
+        self._print_labeled_line("error", message, style="red")
+
+    def _set_status(self, message: str) -> None:
+        with self._lock:
+            self._status_message = message
+
+    def _print_block(self, label: str, text: str, *, style: str) -> None:
+        lines = text.rstrip().splitlines() or ["(empty)"]
+        self._print_labeled_line(label, lines[0], style=style)
+        padding = " " * (len(label) + 2)
+        for line in lines[1:]:
+            self._console.print(f"{padding}{line}")
+
+    def _print_labeled_line(self, label: str, text: str, *, style: str) -> None:
+        self._console.print(f"[bold {style}]{label:>5}[/bold {style}] {text}")

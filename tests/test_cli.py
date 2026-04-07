@@ -125,3 +125,40 @@ def test_interactive_cli_accepts_queued_prompts_while_busy(tmp_path: Path) -> No
     assert "done first" in stdout.getvalue()
     assert "done second" in stdout.getvalue()
     assert agent.seen_history_lengths == [0, 2]
+
+
+def test_interactive_cli_reports_tool_failures(tmp_path: Path) -> None:
+    class FailingToolAgent:
+        def run(self, prompt: str, messages: list[Message] | None = None, *, on_event=None) -> AgentResult:
+            if on_event is not None:
+                on_event("model_start", {"iteration": 1})
+                on_event("tool_execution_start", {"tool_name": "bash", "tool_arguments": '{"command":"false"}'})
+                on_event(
+                    "tool_execution_end",
+                    {"tool_name": "bash", "ok": False, "result": {"error": "command exited with status 1"}},
+                )
+            conversation = list(messages or [])
+            conversation.append(Message.user(prompt))
+            conversation.append(Message.assistant("recovered"))
+            return AgentResult(output="recovered", messages=conversation, iterations=1)
+
+    prompts = iter(["test tool failure", "quit"])
+
+    def fake_input(_: object = "") -> str:
+        return next(prompts)
+
+    stdout = CaptureStream()
+    stderr = CaptureStream()
+
+    exit_code = run_cli(
+        CLIArgs(root=str(tmp_path)),
+        agent=FailingToolAgent(),
+        input_func=fake_input,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 0
+    assert "tool bash false" in stdout.getvalue()
+    assert "tool! command exited with status 1" in stdout.getvalue()
+    assert "recovered" in stdout.getvalue()

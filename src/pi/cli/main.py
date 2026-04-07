@@ -53,6 +53,12 @@ class InputFunc(Protocol):
     def __call__(self, prompt: object = "", /) -> str: ...
 
 
+class EventRenderer(Protocol):
+    def __enter__(self) -> "EventRenderer": ...
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None: ...
+    def handle_event(self, event: str, payload: dict[str, object]) -> None: ...
+
+
 @dataclass(slots=True)
 class TurnSuccess:
     result: AgentResult
@@ -96,7 +102,7 @@ def execute_turn(
     messages: list[Message],
     *,
     stderr: OutputStream | None = None,
-    indicator: StatusIndicator | None = None,
+    indicator: EventRenderer | None = None,
 ) -> AgentResult:
     active_indicator = indicator or StatusIndicator(stderr or sys.stderr)
     run_signature = inspect.signature(agent.run)
@@ -132,7 +138,14 @@ def run_interactive_cli(
     def read_input() -> None:
         while True:
             try:
-                raw = prompt_session.prompt(">>> ") if prompt_session is not None else input_func(">>> ")
+                if prompt_session is not None:
+                    raw = prompt_session.prompt(
+                        ">>> ",
+                        bottom_toolbar=renderer.toolbar_text,
+                        refresh_interval=0.1,
+                    )
+                else:
+                    raw = input_func(">>> ")
             except (EOFError, StopIteration):
                 input_queue.put(None)
                 return
@@ -159,12 +172,12 @@ def run_interactive_cli(
         from prompt_toolkit.patch_stdout import patch_stdout
 
         prompt_session = PromptSession()
-        patch_context = patch_stdout(raw=True)
+        patch_context = patch_stdout()
 
     with patch_context:
         Thread(target=read_input, daemon=True).start()
         if stdout_console.is_terminal:
-            stdout_console.print("[bold cyan]pi[/bold cyan] interactive mode. Type `exit` or `quit` to leave.\n")
+            renderer.print_intro()
         while True:
             try:
                 while True:
@@ -179,11 +192,11 @@ def run_interactive_cli(
                         shutdown_requested = True
                         continue
                     if worker is None and not pending_prompts:
-                        print_user_prompt(stdout_console, prompt)
+                        if not use_prompt_toolkit:
+                            print_user_prompt(stdout_console, prompt)
                         worker = start_turn(prompt)
                     else:
                         pending_prompts.append(prompt)
-                        renderer.log_queued_message(prompt)
                         renderer.set_queue_count(len(pending_prompts))
             except Empty:
                 pass
@@ -196,17 +209,24 @@ def run_interactive_cli(
             if outcome is not None:
                 worker = None
                 if isinstance(outcome, TurnFailure):
-                    print_error(stdout_console, str(outcome.error))
+                    if use_prompt_toolkit:
+                        renderer.print_error(str(outcome.error))
+                    else:
+                        print_error(stdout_console, str(outcome.error))
                 else:
                     messages = outcome.result.messages
                     if session_store and args.session:
                         session_store.save(args.session, messages)
-                    print_agent_output(stdout_console, outcome.result.output)
+                    if use_prompt_toolkit:
+                        renderer.print_agent_output(outcome.result.output)
+                    else:
+                        print_agent_output(stdout_console, outcome.result.output)
                 renderer.set_queue_count(len(pending_prompts))
                 if pending_prompts:
                     next_prompt = pending_prompts.pop(0)
                     renderer.set_queue_count(len(pending_prompts))
-                    print_user_prompt(stdout_console, next_prompt)
+                    if not use_prompt_toolkit:
+                        print_user_prompt(stdout_console, next_prompt)
                     worker = start_turn(next_prompt)
 
             if shutdown_requested and worker is None and not pending_prompts:
