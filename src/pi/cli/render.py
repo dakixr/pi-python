@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import Protocol
 
 
 def truncate_cli_text(text: str, limit: int) -> str:
@@ -43,8 +44,14 @@ def format_user_separator(prompt: str) -> str:
     return f"---\nuser:\n{prompt.rstrip()}\n---"
 
 
+class OutputStream(Protocol):
+    def write(self, text: str, /) -> object: ...
+    def flush(self) -> object: ...
+    def isatty(self) -> bool: ...
+
+
 class StatusIndicator:
-    def __init__(self, stream: object, *, animate: bool = True) -> None:
+    def __init__(self, stream: OutputStream, *, animate: bool = True) -> None:
         self._stream = stream
         self._animate = animate
 

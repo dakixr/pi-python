@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 from pi.agent.loop import Agent, AgentResult
 from pi.agent.models import Message
@@ -29,7 +28,6 @@ class Tool:
     name: str
     description: str
     parameters: dict[str, object]
-    handler: Callable[[dict[str, Any]], Any] | None = None
 
     def to_definition(self) -> dict[str, object]:
         return {

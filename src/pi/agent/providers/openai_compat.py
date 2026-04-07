@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from typing import Any
 
 import httpx
 from pydantic import BaseModel, Field, ValidationError
 
-from pi.agent.models import Message, ToolCall
+from pi.agent.models import Message, Role, ToolCall
 from pi.agent.providers.base import Provider, ProviderError, ProviderRateLimitError, ProviderServerError
 
 
@@ -23,7 +24,7 @@ class OpenAICompatibleConfig(BaseModel):
 
 
 class OpenAICompatibleResponseMessage(BaseModel):
-    role: str
+    role: Role
     content: str | None = None
     tool_calls: list[ToolCall] = Field(default_factory=list)
 
@@ -44,12 +45,12 @@ class OpenAICompatibleProvider(Provider):
         self,
         config: OpenAICompatibleConfig,
         http_client: httpx.Client | None = None,
-        sleep: Any | None = None,
+        sleep: Callable[[float], None] | None = None,
     ) -> None:
         self.config = config
         self._owns_client = http_client is None
         self._sleep = sleep or time.sleep
-        headers = {
+        self._headers = {
             "Authorization": f"Bearer {config.api_key}",
             "Content-Type": "application/json",
             **config.headers,
@@ -57,7 +58,7 @@ class OpenAICompatibleProvider(Provider):
         self._client = http_client or httpx.Client(
             base_url=config.base_url.rstrip("/"),
             timeout=config.timeout_seconds,
-            headers=headers,
+            headers=self._headers,
         )
 
     def complete(self, messages: list[Message], tools: list[dict[str, object]]) -> Message:
@@ -72,7 +73,7 @@ class OpenAICompatibleProvider(Provider):
         last_error: ProviderError | None = None
         for attempt in range(self.config.max_retries + 1):
             try:
-                response = self._client.post(self._chat_completions_url(), json=payload)
+                response = self._client.post(self._chat_completions_url(), json=payload, headers=self._headers)
             except httpx.TimeoutException as exc:
                 last_error = ProviderError("Provider request timed out.")
                 if attempt < self.config.max_retries:

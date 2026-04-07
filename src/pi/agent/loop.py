@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-import json
 from typing import Literal
 
 from pi.agent.context import AgentContext, ContextManager
@@ -52,6 +51,12 @@ class AfterToolCallResult:
 class PreparedToolCall:
     tool_call: ToolCall
     arguments: dict[str, object]
+
+
+@dataclass(slots=True)
+class ImmediateToolResult:
+    tool_call: ToolCall
+    result: dict[str, object]
 
 
 class MaxIterationsExceededError(RuntimeError):
@@ -149,8 +154,8 @@ class Agent:
         tool_calls: list[ToolCall],
         on_event: AgentEventHandler | None,
         before_tool_call: BeforeToolCallHook | None,
-    ) -> list[PreparedToolCall | tuple[ToolCall, dict[str, object]]]:
-        prepared: list[PreparedToolCall | tuple[ToolCall, dict[str, object]]] = []
+    ) -> list[PreparedToolCall | ImmediateToolResult]:
+        prepared: list[PreparedToolCall | ImmediateToolResult] = []
         for tool_call in tool_calls:
             self._emit(
                 on_event,
@@ -176,40 +181,45 @@ class Agent:
                         )
                     )
                     if hook_result is not None and hook_result.block:
-                        prepared.append((tool_call, {"ok": False, "error": hook_result.reason or "Tool execution was blocked"}))
+                        prepared.append(
+                            ImmediateToolResult(
+                                tool_call=tool_call,
+                                result={"ok": False, "error": hook_result.reason or "Tool execution was blocked"},
+                            )
+                        )
                         continue
                     if hook_result is not None and hook_result.arguments is not None:
                         invocation = self.tools.prepare(tool_call.function.name, hook_result.arguments)
                         arguments = invocation.model_dump(by_alias=True, exclude_none=True)
                 prepared.append(PreparedToolCall(tool_call=tool_call, arguments=arguments))
             except Exception as exc:
-                prepared.append((tool_call, {"ok": False, "error": str(exc)}))
+                prepared.append(ImmediateToolResult(tool_call=tool_call, result={"ok": False, "error": str(exc)}))
         return prepared
 
     def _execute_tool_calls(
         self,
         *,
         iteration: int,
-        prepared_calls: list[PreparedToolCall | tuple[ToolCall, dict[str, object]]],
+        prepared_calls: list[PreparedToolCall | ImmediateToolResult],
         context: AgentContext,
         on_event: AgentEventHandler | None,
         after_tool_call: AfterToolCallHook | None,
     ) -> list[tuple[ToolCall, dict[str, object]]]:
         results: list[tuple[ToolCall, dict[str, object]]] = []
         runnable = [item for item in prepared_calls if isinstance(item, PreparedToolCall)]
-        immediate = [item for item in prepared_calls if not isinstance(item, PreparedToolCall)]
+        immediate = [item for item in prepared_calls if isinstance(item, ImmediateToolResult)]
 
-        for tool_call, result in immediate:
+        for item in immediate:
             finalized = self._finalize_tool_result(
                 iteration=iteration,
-                tool_call=tool_call,
+                tool_call=item.tool_call,
                 arguments={},
-                result=result,
+                result=item.result,
                 context=context,
                 on_event=on_event,
                 after_tool_call=after_tool_call,
             )
-            results.append((tool_call, finalized))
+            results.append((item.tool_call, finalized))
 
         if self.tool_execution == "sequential" or len(runnable) < 2:
             for prepared in runnable:
@@ -250,14 +260,14 @@ class Agent:
 
     def _order_results(
         self,
-        prepared_calls: list[PreparedToolCall | tuple[ToolCall, dict[str, object]]],
+        prepared_calls: list[PreparedToolCall | ImmediateToolResult],
         results: list[tuple[ToolCall, dict[str, object]]],
     ) -> list[tuple[ToolCall, dict[str, object]]]:
         ordered = {tool_call.id: (tool_call, result) for tool_call, result in results}
         return [
-            ordered[item.tool_call.id if isinstance(item, PreparedToolCall) else item[0].id]
+            ordered[item.tool_call.id]
             for item in prepared_calls
-            if (item.tool_call.id if isinstance(item, PreparedToolCall) else item[0].id) in ordered
+            if item.tool_call.id in ordered
         ]
 
     def _finalize_tool_result(

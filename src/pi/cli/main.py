@@ -5,16 +5,16 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 import sys
-from typing import Annotated
+from typing import Annotated, Protocol
 
 import typer
 
-from pi.agent.loop import Agent, AgentResult, MaxIterationsExceededError
+from pi.agent.loop import Agent, AgentEventHandler, AgentResult, MaxIterationsExceededError
 from pi.agent.models import Message
 from pi.agent.providers.base import ProviderError
 from pi.agent.providers.zai import ZAIConfig, ZAIProvider
 from pi.agent.tools import ToolRegistry
-from pi.cli.render import StatusIndicator, format_user_separator
+from pi.cli.render import OutputStream, StatusIndicator, format_user_separator
 from pi.cli.session import SessionStore
 
 DEFAULT_SYSTEM_PROMPT = (
@@ -25,6 +25,20 @@ DEFAULT_SYSTEM_PROMPT = (
 DEFAULT_MODEL = "glm-5.1"
 DEFAULT_MAX_ITERATIONS = 20
 RUN_ERRORS = (ProviderError, MaxIterationsExceededError)
+
+
+class AgentRunner(Protocol):
+    def run(
+        self,
+        prompt: str,
+        messages: list[Message] | None = None,
+        *,
+        on_event: AgentEventHandler | None = None,
+    ) -> AgentResult: ...
+
+
+class InputFunc(Protocol):
+    def __call__(self, prompt: object = "", /) -> str: ...
 
 
 @dataclass(slots=True)
@@ -55,11 +69,11 @@ def build_agent_from_args(args: CLIArgs) -> Agent:
 
 
 def execute_turn(
-    agent: Agent,
+    agent: AgentRunner,
     prompt: str,
     messages: list[Message],
     *,
-    stderr: object | None = None,
+    stderr: OutputStream | None = None,
     indicator: StatusIndicator | None = None,
 ) -> AgentResult:
     active_indicator = indicator or StatusIndicator(stderr or sys.stderr)
@@ -72,12 +86,12 @@ def execute_turn(
 
 def run_interactive_cli(
     args: CLIArgs,
-    agent: Agent,
+    agent: AgentRunner,
     session_messages: list[Message],
     *,
     session_store: SessionStore | None,
-    input_func: object,
-    stderr: object,
+    input_func: InputFunc,
+    stderr: OutputStream,
 ) -> int:
     messages = list(session_messages)
     while True:
@@ -104,10 +118,10 @@ def run_interactive_cli(
 
 def run_cli(
     args: CLIArgs,
-    agent: Agent | None = None,
+    agent: AgentRunner | None = None,
     *,
-    input_func: object = input,
-    stderr: object | None = None,
+    input_func: InputFunc = input,
+    stderr: OutputStream | None = None,
 ) -> int:
     stream = stderr or sys.stderr
     try:

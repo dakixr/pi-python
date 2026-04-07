@@ -73,14 +73,12 @@ class SessionStore:
 
         paths.session_dir.mkdir(parents=True, exist_ok=True)
         if not paths.events_path.exists():
-            header = SessionHeader(id=session_id, timestamp=created_at, parent_session=parent)
-            paths.events_path.write_text(header.model_dump_json() + "\n", encoding="utf-8")
+            self._write_events_header(paths.events_path, session_id=session_id, created_at=created_at, parent_session=parent)
 
         previous_count = len(existing.messages)
         if previous_count > len(messages):
             paths.events_path.unlink(missing_ok=True)
-            header = SessionHeader(id=session_id, timestamp=created_at, parent_session=parent)
-            paths.events_path.write_text(header.model_dump_json() + "\n", encoding="utf-8")
+            self._write_events_header(paths.events_path, session_id=session_id, created_at=created_at, parent_session=parent)
             previous_count = 0
 
         with paths.events_path.open("a", encoding="utf-8") as handle:
@@ -121,6 +119,10 @@ class SessionStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(record.model_dump_json(indent=2), encoding="utf-8")
 
+    def _write_events_header(self, path: Path, *, session_id: str, created_at: str, parent_session: str | None) -> None:
+        header = SessionHeader(id=session_id, timestamp=created_at, parent_session=parent_session)
+        path.write_text(header.model_dump_json() + "\n", encoding="utf-8")
+
     def _rebuild_from_events(self, path: Path) -> SessionRecord:
         header: SessionHeader | None = None
         messages: list[Message] = []
@@ -139,6 +141,7 @@ class SessionStore:
                 updated_at = entry.timestamp
         if header is None:
             raise ValueError(f"Session log {path} is missing a header")
+        assert header is not None
         return SessionRecord(
             id=header.id,
             messages=messages,

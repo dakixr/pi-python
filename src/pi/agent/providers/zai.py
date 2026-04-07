@@ -11,7 +11,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, Field, ValidationError
 
-from pi.agent.models import Message, ToolCall
+from pi.agent.models import Message, Role, ToolCall
 from pi.agent.providers.base import Provider, ProviderError, ProviderRateLimitError, ProviderServerError
 
 
@@ -27,7 +27,7 @@ class ZAIConfig(BaseModel):
 
 
 class ZAIResponseMessage(BaseModel):
-    role: str
+    role: Role
     content: str | None = None
     tool_calls: list[ToolCall] = Field(default_factory=list)
 
@@ -204,8 +204,9 @@ class ZAIProvider(Provider):
         trailing_tool_ids: list[str] = []
         index = len(messages) - 1
         while index >= 0 and messages[index].role == "tool":
-            if messages[index].tool_call_id:
-                trailing_tool_ids.append(messages[index].tool_call_id)
+            tool_call_id = messages[index].tool_call_id
+            if tool_call_id:
+                trailing_tool_ids.append(tool_call_id)
             index -= 1
         if not trailing_tool_ids or index < 0:
             return None

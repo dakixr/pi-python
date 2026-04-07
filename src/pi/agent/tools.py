@@ -10,12 +10,12 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, PrivateAttr, ValidationError, model_validator
 
 from pi.agent.models import ToolCall
-from pi.agent.truncate import DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, format_size, truncate_head, truncate_line, truncate_tail
+from pi.agent.truncate import DEFAULT_MAX_BYTES, format_size, truncate_head, truncate_line, truncate_tail
 
 DEFAULT_GLOB = "*"
 
@@ -78,6 +78,8 @@ class WorkspaceTool(BaseTool, ABC):
         root = context.get("root")
         if root is None:
             raise ValueError("Workspace root is required")
+        if not isinstance(root, (str, os.PathLike)):
+            raise ValueError("Workspace root must be path-like")
         candidate = Path(root).resolve()
         if not candidate.exists() or not candidate.is_dir():
             raise ValueError(f"Workspace root does not exist or is not a directory: {root}")
@@ -349,7 +351,9 @@ class EditTool(WorkspaceTool):
     def normalized_edits(self) -> list[ReplaceEdit]:
         if self.edits:
             return self.edits
-        return [ReplaceEdit(oldText=self.old_text, newText=self.new_text)]
+        assert self.old_text is not None
+        assert self.new_text is not None
+        return [ReplaceEdit(old_text=self.old_text, new_text=self.new_text)]
 
     def execute(self) -> dict[str, object]:
         try:
@@ -392,23 +396,26 @@ class BashTool(WorkspaceTool):
 
     def execute(self) -> dict[str, object]:
         try:
-            run_kwargs: dict[str, object] = {
-                "cwd": self.root,
-                "capture_output": True,
-                "text": True,
-                "check": False,
-                "env": os.environ.copy(),
-            }
-            if self.timeout is not None:
-                run_kwargs["timeout"] = self.timeout
-            completed = subprocess.run(["bash", "-lc", self.command], **run_kwargs)
+            completed = subprocess.run(
+                ["bash", "-lc", self.command],
+                cwd=self.root,
+                capture_output=True,
+                text=True,
+                check=False,
+                env=os.environ.copy(),
+                timeout=self.timeout,
+            )
             return self._build_result(
                 returncode=completed.returncode,
                 stdout=completed.stdout,
                 stderr=completed.stderr,
             )
         except subprocess.TimeoutExpired as exc:
-            result = self._build_result(returncode=-1, stdout=exc.stdout or "", stderr=exc.stderr or "")
+            result = self._build_result(
+                returncode=-1,
+                stdout=_coerce_subprocess_output(exc.stdout),
+                stderr=_coerce_subprocess_output(exc.stderr),
+            )
             result["ok"] = False
             result["error"] = f"Command timed out after {self.timeout} seconds"
             return result
@@ -597,3 +604,11 @@ class ToolRegistry:
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
         return self.execute_name(tool_call.function.name, arguments)
+
+
+def _coerce_subprocess_output(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
