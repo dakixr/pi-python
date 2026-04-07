@@ -5,7 +5,7 @@
 The codebase is intentionally narrow:
 
 - `pi.agent`: agent loop, context handling, tool runtime, and providers
-- `pi.ai`: embeddable Python SDK helpers and the `pi-ai` metadata CLI
+- `pi.ai`: embeddable Python SDK helpers
 - `pi.cli`: local one-shot and interactive CLI, exported as `pi`
 
 ## Native Surface
@@ -42,7 +42,6 @@ print(result.output)
 
 ```bash
 uv run pi --help
-uv run pi-ai list
 ```
 
 ## Development
