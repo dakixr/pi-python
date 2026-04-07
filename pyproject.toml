@@ -10,8 +10,8 @@ dependencies = ["httpx>=0.27,<0.29", "prompt-toolkit>=3.0,<4.0", "pydantic>=2.9,
 [project.scripts]
 pi = "pi.cli.main:main"
 
-[tool.uv]
-dev-dependencies = ["pytest>=8.3"]
+[dependency-groups]
+dev = ["pytest>=8.3"]
 
 [tool.uv.build-backend]
 module-name = "pi"
