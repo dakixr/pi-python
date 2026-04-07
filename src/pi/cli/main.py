@@ -127,13 +127,9 @@ def run_interactive_cli(
     input_closed = False
 
     use_prompt_toolkit = input_func is input and stdout_console.is_terminal
+    prompt_session = None
 
     def read_input() -> None:
-        prompt_session = None
-        if use_prompt_toolkit:
-            from prompt_toolkit import PromptSession
-
-            prompt_session = PromptSession()
         while True:
             try:
                 raw = prompt_session.prompt(">>> ") if prompt_session is not None else input_func(">>> ")
@@ -159,8 +155,10 @@ def run_interactive_cli(
 
     patch_context = nullcontext()
     if use_prompt_toolkit:
+        from prompt_toolkit import PromptSession
         from prompt_toolkit.patch_stdout import patch_stdout
 
+        prompt_session = PromptSession()
         patch_context = patch_stdout(raw=True)
 
     with patch_context:

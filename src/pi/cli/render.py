@@ -135,6 +135,14 @@ class StatusIndicator:
             return
         if event == "tool_execution_end":
             ok = payload.get("ok", False)
+            if not ok:
+                result = payload.get("result")
+                error_text = None
+                if isinstance(result, dict):
+                    raw_error = result.get("error")
+                    if isinstance(raw_error, str) and raw_error.strip():
+                        error_text = truncate_cli_text(raw_error, 120)
+                self._log_event_line("Tool failed", error_text or "The tool returned an error.", style="red")
             self._update("Thinking" if ok else "Handling tool failure")
 
     def clear(self) -> None:
