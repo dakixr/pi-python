@@ -1,17 +1,15 @@
 from __future__ import annotations
 
-from collections.abc import Coroutine
-from contextlib import nullcontext
-import asyncio
+from collections.abc import Callable
 import inspect
 import os
 from dataclasses import dataclass
 from pathlib import Path
 import sys
 from queue import Empty, Queue
-from threading import Thread
+from threading import Thread, get_ident
 import time
-from typing import Annotated, Protocol, cast
+from typing import Annotated, Protocol
 
 import typer
 
@@ -81,6 +79,63 @@ class CLIArgs:
     max_iterations: int = DEFAULT_MAX_ITERATIONS
 
 
+class PromptToolkitLiveRenderer:
+    def __init__(
+        self,
+        *,
+        emit_line: Callable[[str], None],
+        set_status: Callable[[str], None],
+    ) -> None:
+        self._emit_line = emit_line
+        self._set_status = set_status
+
+    def __enter__(self) -> "PromptToolkitLiveRenderer":
+        self._set_status("Thinking")
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self._set_status("Ready")
+        return None
+
+    def handle_event(self, event: str, payload: dict[str, object]) -> None:
+        from pi.cli.render import format_tool_preview, truncate_cli_text
+
+        if event == "model_start":
+            self._set_status("Thinking")
+            return
+        if event == "model_end":
+            self._set_status("Planning next step")
+            return
+        if event == "tool_execution_start":
+            tool_name = payload.get("tool_name", "tool")
+            tool_arguments = payload.get("tool_arguments")
+            self._emit_line(f"tool {format_tool_preview(str(tool_name), tool_arguments)}")
+            self._set_status("Waiting on tool result")
+            return
+        if event == "tool_execution_end":
+            ok = payload.get("ok", False)
+            if not ok:
+                result = payload.get("result")
+                error_text = None
+                if isinstance(result, dict):
+                    raw_error = result.get("error")
+                    if isinstance(raw_error, str) and raw_error.strip():
+                        error_text = truncate_cli_text(raw_error, 120)
+                self._emit_line(f"tool! {error_text or 'The tool returned an error.'}")
+                self._set_status("Handling tool failure")
+                return
+            self._set_status("Thinking")
+
+    def print_agent_output(self, text: str) -> None:
+        lines = text.rstrip().splitlines() or ["(empty)"]
+        self._emit_line(f"pi {lines[0]}")
+        for line in lines[1:]:
+            self._emit_line(f"   {line}")
+
+    def print_error(self, message: str) -> None:
+        self._emit_line(f"error {message}")
+
+
 def build_agent_from_args(args: CLIArgs) -> Agent:
     if not args.api_key:
         raise ValueError("A ZAI API key is required. Pass --api-key or set ZAI_API_KEY.")
@@ -124,6 +179,36 @@ def run_interactive_cli(
     stdout: OutputStream,
     stderr: OutputStream,
 ) -> int:
+    stdout_console = build_console(stdout)
+    if input_func is input and stdout_console.is_terminal:
+        return run_prompt_toolkit_cli(
+            args,
+            agent,
+            session_messages,
+            session_store=session_store,
+        )
+
+    return run_basic_interactive_cli(
+        args,
+        agent,
+        session_messages,
+        session_store=session_store,
+        input_func=input_func,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
+def run_basic_interactive_cli(
+    args: CLIArgs,
+    agent: AgentRunner,
+    session_messages: list[Message],
+    *,
+    session_store: SessionStore | None,
+    input_func: InputFunc,
+    stdout: OutputStream,
+    stderr: OutputStream,
+) -> int:
     messages = list(session_messages)
     stdout_console = build_console(stdout)
     renderer = InteractiveRenderer(stdout)
@@ -134,20 +219,10 @@ def run_interactive_cli(
     shutdown_requested = False
     input_closed = False
 
-    use_prompt_toolkit = input_func is input and stdout_console.is_terminal
-    prompt_session = None
-
     def read_input() -> None:
         while True:
             try:
-                if prompt_session is not None:
-                    raw = prompt_session.prompt(
-                        ">>> ",
-                        bottom_toolbar=renderer.toolbar_text,
-                        refresh_interval=0.1,
-                    )
-                else:
-                    raw = input_func(">>> ")
+                raw = input_func(">>> ")
             except (EOFError, StopIteration):
                 input_queue.put(None)
                 return
@@ -168,89 +243,245 @@ def run_interactive_cli(
         thread.start()
         return thread
 
-    patch_context = nullcontext()
-    if use_prompt_toolkit:
-        from prompt_toolkit import PromptSession
-        from prompt_toolkit.application.run_in_terminal import run_in_terminal
-
-        prompt_session = PromptSession()
-
-        def terminal_writer(callback) -> None:
-            app = prompt_session.app
-            loop = app.loop
-            if loop is None:
-                callback()
-                return
-            coroutine = cast(Coroutine[object, object, None], run_in_terminal(callback))
-            future = asyncio.run_coroutine_threadsafe(coroutine, loop)
-            future.result()
-
-        renderer.attach_prompt_renderer(
-            terminal_writer=terminal_writer,
-            invalidate_prompt=prompt_session.app.invalidate,
-        )
-
-    with patch_context:
-        Thread(target=read_input, daemon=True).start()
-        if stdout_console.is_terminal:
-            renderer.print_intro()
-        while True:
-            try:
-                while True:
-                    prompt = input_queue.get_nowait()
-                    if prompt is None:
-                        input_closed = True
-                        shutdown_requested = True
-                        continue
-                    if not prompt:
-                        continue
-                    if prompt.lower() in {"exit", "quit"}:
-                        shutdown_requested = True
-                        continue
-                    if worker is None and not pending_prompts:
-                        if not use_prompt_toolkit:
-                            print_user_prompt(stdout_console, prompt)
-                        worker = start_turn(prompt)
-                    else:
-                        pending_prompts.append(prompt)
-                        renderer.set_queue_count(len(pending_prompts))
-            except Empty:
-                pass
-
-            try:
-                outcome = result_queue.get_nowait()
-            except Empty:
-                outcome = None
-
-            if outcome is not None:
-                worker = None
-                if isinstance(outcome, TurnFailure):
-                    if use_prompt_toolkit:
-                        renderer.print_error(str(outcome.error))
-                    else:
-                        print_error(stdout_console, str(outcome.error))
+    Thread(target=read_input, daemon=True).start()
+    if stdout_console.is_terminal:
+        renderer.print_intro()
+    while True:
+        try:
+            while True:
+                prompt = input_queue.get_nowait()
+                if prompt is None:
+                    input_closed = True
+                    shutdown_requested = True
+                    continue
+                if not prompt:
+                    continue
+                if prompt.lower() in {"exit", "quit"}:
+                    shutdown_requested = True
+                    continue
+                if worker is None and not pending_prompts:
+                    print_user_prompt(stdout_console, prompt)
+                    worker = start_turn(prompt)
                 else:
-                    messages = outcome.result.messages
-                    if session_store and args.session:
-                        session_store.save(args.session, messages)
-                    if use_prompt_toolkit:
-                        renderer.print_agent_output(outcome.result.output)
-                    else:
-                        print_agent_output(stdout_console, outcome.result.output)
-                renderer.set_queue_count(len(pending_prompts))
-                if pending_prompts:
-                    next_prompt = pending_prompts.pop(0)
+                    pending_prompts.append(prompt)
                     renderer.set_queue_count(len(pending_prompts))
-                    if not use_prompt_toolkit:
-                        print_user_prompt(stdout_console, next_prompt)
-                    worker = start_turn(next_prompt)
+        except Empty:
+            pass
 
-            if shutdown_requested and worker is None and not pending_prompts:
-                if input_closed:
-                    stdout_console.print()
-                return 0
+        try:
+            outcome = result_queue.get_nowait()
+        except Empty:
+            outcome = None
 
-            time.sleep(0.05)
+        if outcome is not None:
+            worker = None
+            if isinstance(outcome, TurnFailure):
+                print_error(stdout_console, str(outcome.error))
+            else:
+                messages = outcome.result.messages
+                if session_store and args.session:
+                    session_store.save(args.session, messages)
+                print_agent_output(stdout_console, outcome.result.output)
+            renderer.set_queue_count(len(pending_prompts))
+            if pending_prompts:
+                next_prompt = pending_prompts.pop(0)
+                renderer.set_queue_count(len(pending_prompts))
+                print_user_prompt(stdout_console, next_prompt)
+                worker = start_turn(next_prompt)
+
+        if shutdown_requested and worker is None and not pending_prompts:
+            if input_closed:
+                stdout_console.print()
+            return 0
+
+        time.sleep(0.05)
+
+
+def run_prompt_toolkit_cli(
+    args: CLIArgs,
+    agent: AgentRunner,
+    session_messages: list[Message],
+    *,
+    session_store: SessionStore | None,
+) -> int:
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.document import Document
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import HSplit, Layout, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.styles import Style
+    from prompt_toolkit.widgets import TextArea
+
+    messages = list(session_messages)
+    pending_prompts: list[str] = []
+    worker: Thread | None = None
+    shutdown_requested = False
+    status_message = "Ready"
+    spinner_index = 0
+    spinner_frames = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+    transcript_lines = ["pi interactive mode. Type `exit` or `quit` to leave.", ""]
+    ui_thread_id = get_ident()
+    app: Application[int]
+
+    transcript = TextArea(
+        text="",
+        read_only=True,
+        focusable=False,
+        scrollbar=True,
+        wrap_lines=True,
+        style="class:transcript",
+    )
+    input_field = TextArea(
+        height=1,
+        prompt=">>> ",
+        multiline=False,
+        wrap_lines=False,
+        style="class:input",
+    )
+
+    def sync_transcript() -> None:
+        text = "\n".join(transcript_lines).rstrip() + "\n"
+        transcript.buffer.set_document(Document(text, cursor_position=len(text)), bypass_readonly=True)
+
+    def dispatch_ui(callback: Callable[[], None]) -> None:
+        loop = app.loop
+        if get_ident() == ui_thread_id or loop is None:
+            callback()
+            return
+        loop.call_soon_threadsafe(callback)
+
+    def append_line(text: str) -> None:
+        def update() -> None:
+            transcript_lines.append(text)
+            sync_transcript()
+            app.invalidate()
+
+        dispatch_ui(update)
+
+    def update_status(message: str) -> None:
+        nonlocal status_message
+
+        def update() -> None:
+            nonlocal status_message
+            status_message = message
+            app.invalidate()
+
+        dispatch_ui(update)
+
+    renderer = PromptToolkitLiveRenderer(
+        emit_line=append_line,
+        set_status=update_status,
+    )
+
+    def start_turn(prompt: str) -> Thread:
+        history = list(messages)
+
+        def run_turn() -> None:
+            try:
+                result = execute_turn(agent, prompt, history, indicator=renderer)
+            except RUN_ERRORS as exc:
+                dispatch_ui(lambda: handle_outcome(TurnFailure(error=exc)))
+                return
+            dispatch_ui(lambda: handle_outcome(TurnSuccess(result=result)))
+
+        thread = Thread(target=run_turn, daemon=True)
+        thread.start()
+        return thread
+
+    def request_exit() -> None:
+        nonlocal shutdown_requested
+        shutdown_requested = True
+        if worker is None and not pending_prompts:
+            app.exit(result=0)
+            return
+        update_status("Finishing queued work before exit")
+
+    def submit_prompt() -> None:
+        nonlocal worker
+        prompt = input_field.text.strip()
+        input_field.buffer.set_document(Document("", cursor_position=0), bypass_readonly=True)
+        if not prompt:
+            return
+        if prompt.lower() in {"exit", "quit"}:
+            request_exit()
+            return
+        append_line(f">>> {prompt}")
+        if worker is None and not pending_prompts:
+            worker = start_turn(prompt)
+            return
+        pending_prompts.append(prompt)
+        app.invalidate()
+
+    def handle_outcome(outcome: TurnSuccess | TurnFailure) -> None:
+        nonlocal messages, worker, shutdown_requested
+        worker = None
+        if isinstance(outcome, TurnFailure):
+            renderer.print_error(str(outcome.error))
+        else:
+            messages = outcome.result.messages
+            if session_store and args.session:
+                session_store.save(args.session, messages)
+            renderer.print_agent_output(outcome.result.output)
+        if pending_prompts:
+            next_prompt = pending_prompts.pop(0)
+            worker = start_turn(next_prompt)
+        elif shutdown_requested:
+            app.exit(result=0)
+            return
+        else:
+            update_status("Ready")
+        app.invalidate()
+
+    def get_status_fragments() -> list[tuple[str, str]]:
+        nonlocal spinner_index
+        if worker is not None:
+            frame = spinner_frames[spinner_index % len(spinner_frames)]
+            spinner_index += 1
+            queued = f" | {len(pending_prompts)} queued" if pending_prompts else ""
+            return [("class:status.busy", f" {frame} {status_message}{queued} ")]
+        if pending_prompts:
+            return [("class:status.queued", f" queued | {len(pending_prompts)} waiting ")]
+        return [("class:status.idle", f" {status_message} ")]
+
+    kb = KeyBindings()
+
+    @kb.add("enter")
+    def _submit(event) -> None:
+        submit_prompt()
+
+    @kb.add("c-c")
+    @kb.add("c-d")
+    def _exit(event) -> None:
+        request_exit()
+
+    app = Application(
+        layout=Layout(
+            HSplit(
+                [
+                    transcript,
+                    Window(height=1, content=FormattedTextControl(get_status_fragments)),
+                    input_field,
+                ]
+            ),
+            focused_element=input_field,
+        ),
+        key_bindings=kb,
+        full_screen=False,
+        mouse_support=False,
+        refresh_interval=0.1,
+        style=Style.from_dict(
+            {
+                "transcript": "fg:#d8dee9 bg:#2b303b",
+                "input": "fg:#eceff4 bg:#2b303b",
+                "status.busy": "fg:#eceff4 bg:#4c566a bold",
+                "status.queued": "fg:#2e3440 bg:#ebcb8b bold",
+                "status.idle": "fg:#2e3440 bg:#a3be8c bold",
+            }
+        ),
+    )
+
+    sync_transcript()
+    return app.run()
 
 
 def run_cli(
