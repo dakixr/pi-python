@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import sys
 from queue import Empty, Queue
-from threading import Thread, get_ident
+from threading import Lock, Thread
 import time
 from typing import Annotated, Protocol
 
@@ -304,16 +304,8 @@ def run_prompt_toolkit_cli(
     *,
     session_store: SessionStore | None,
 ) -> int:
-    from prompt_toolkit.application import Application
-    from prompt_toolkit.document import Document
-    from prompt_toolkit.filters import Condition
-    from prompt_toolkit.key_binding import KeyBindings
-    from prompt_toolkit.layout import HSplit, Layout, Window
-    from prompt_toolkit.layout.containers import ConditionalContainer
-    from prompt_toolkit.layout.controls import FormattedTextControl
-    from prompt_toolkit.layout.dimension import Dimension
-    from prompt_toolkit.styles import Style
-    from prompt_toolkit.widgets import TextArea
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.application.run_in_terminal import run_in_terminal
 
     messages = list(session_messages)
     pending_prompts: list[str] = []
@@ -322,189 +314,141 @@ def run_prompt_toolkit_cli(
     status_message = "Ready"
     spinner_index = 0
     spinner_frames = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
-    ui_thread_id = get_ident()
-    app: Application[int]
-
-    transcript = TextArea(
-        text="",
-        read_only=False,
-        focusable=False,
-        scrollbar=True,
-        wrap_lines=True,
-        style="class:transcript",
-    )
-    input_field = TextArea(
-        height=1,
-        prompt=">>> ",
-        multiline=False,
-        wrap_lines=False,
-        style="class:input",
-    )
-
-    def dispatch_ui(callback: Callable[[], None]) -> None:
-        loop = app.loop
-        if get_ident() == ui_thread_id or loop is None:
-            callback()
-            return
-        loop.call_soon_threadsafe(callback)
-
-    def append_line(text: str) -> None:
-        def update() -> None:
-            if transcript.buffer.text and not transcript.buffer.text.endswith("\n"):
-                transcript.buffer.insert_text("\n")
-            transcript.buffer.insert_text(f"{text}\n")
-            app.invalidate()
-
-        dispatch_ui(update)
+    state_lock = Lock()
+    prompt_session = PromptSession()
 
     def update_status(message: str) -> None:
         nonlocal status_message
-
-        def update() -> None:
-            nonlocal status_message
+        with state_lock:
             status_message = message
-            app.invalidate()
+        invalidate_prompt()
 
-        dispatch_ui(update)
+    def invalidate_prompt() -> None:
+        app = prompt_session.app
+        loop = app.loop
+        if loop is None:
+            return
+        loop.call_soon_threadsafe(app.invalidate)
+
+    def print_transcript_line(text: str) -> None:
+        def emit() -> None:
+            print(text)
+
+        app = prompt_session.app
+        loop = app.loop
+        if loop is None:
+            emit()
+            return
+        loop.call_soon_threadsafe(lambda: run_in_terminal(emit))
 
     renderer = PromptToolkitLiveRenderer(
-        emit_line=append_line,
+        emit_line=print_transcript_line,
         set_status=update_status,
     )
 
     def start_turn(prompt: str) -> Thread:
-        history = list(messages)
+        nonlocal worker
+        with state_lock:
+            history = list(messages)
 
         def run_turn() -> None:
             try:
                 result = execute_turn(agent, prompt, history, indicator=renderer)
             except RUN_ERRORS as exc:
-                dispatch_ui(lambda: handle_outcome(TurnFailure(error=exc)))
+                handle_outcome(TurnFailure(error=exc))
                 return
-            dispatch_ui(lambda: handle_outcome(TurnSuccess(result=result)))
+            handle_outcome(TurnSuccess(result=result))
 
         thread = Thread(target=run_turn, daemon=True)
+        with state_lock:
+            worker = thread
         thread.start()
         return thread
 
     def request_exit() -> None:
         nonlocal shutdown_requested
         shutdown_requested = True
-        if worker is None and not pending_prompts:
-            app.exit(result=0)
-            return
-        update_status("Finishing queued work before exit")
-
-    def submit_prompt() -> None:
-        nonlocal worker
-        prompt = input_field.text.strip()
-        input_field.buffer.set_document(Document("", cursor_position=0), bypass_readonly=True)
-        if not prompt:
-            return
-        if prompt.lower() in {"exit", "quit"}:
-            request_exit()
-            return
-        if worker is None and not pending_prompts:
-            append_line(f">>> {prompt}")
-            worker = start_turn(prompt)
-            return
-        pending_prompts.append(prompt)
-        app.invalidate()
+        with state_lock:
+            has_pending_work = worker is not None or bool(pending_prompts)
+        if has_pending_work:
+            update_status("Finishing queued work before exit")
 
     def handle_outcome(outcome: TurnSuccess | TurnFailure) -> None:
         nonlocal messages, worker, shutdown_requested
-        worker = None
         if isinstance(outcome, TurnFailure):
             renderer.print_error(str(outcome.error))
         else:
-            messages = outcome.result.messages
+            with state_lock:
+                messages = outcome.result.messages
             if session_store and args.session:
-                session_store.save(args.session, messages)
+                session_store.save(args.session, outcome.result.messages)
             renderer.print_agent_output(outcome.result.output)
-        if pending_prompts:
-            next_prompt = pending_prompts.pop(0)
-            append_line(f">>> {next_prompt}")
-            worker = start_turn(next_prompt)
-        elif shutdown_requested:
-            app.exit(result=0)
+        next_prompt: str | None = None
+        should_finish = False
+        with state_lock:
+            worker = None
+            if pending_prompts:
+                next_prompt = pending_prompts.pop(0)
+            else:
+                should_finish = shutdown_requested
+        if next_prompt is not None:
+            start_turn(next_prompt)
             return
-        else:
-            update_status("Ready")
-        app.invalidate()
+        if should_finish:
+            invalidate_prompt()
+            return
+        update_status("Ready")
 
-    def get_status_fragments() -> list[tuple[str, str]]:
+    def get_bottom_toolbar() -> list[tuple[str, str]]:
         nonlocal spinner_index
-        if worker is not None:
+        with state_lock:
+            current_worker = worker
+            pending_count = len(pending_prompts)
+            current_status = status_message
+        if current_worker is not None:
             frame = spinner_frames[spinner_index % len(spinner_frames)]
             spinner_index += 1
-            queued = f" | {len(pending_prompts)} queued" if pending_prompts else ""
-            return [("class:status.busy", f" {frame} {status_message}{queued} ")]
-        if pending_prompts:
-            return [("class:status.queued", f" queued | {len(pending_prompts)} waiting ")]
-        return [("class:status.idle", f" {status_message} ")]
-
-    def get_queue_fragments() -> list[tuple[str, str]]:
-        fragments: list[tuple[str, str]] = []
-        preview_prompts = pending_prompts[:3]
-        for index, prompt in enumerate(preview_prompts, start=1):
-            fragments.append(("class:queue.label", f" queued {index} "))
-            fragments.append(("class:queue.text", f" {prompt}\n"))
-        remaining = len(pending_prompts) - len(preview_prompts)
-        if remaining > 0:
-            fragments.append(("class:queue.more", f" +{remaining} more queued\n"))
-        return fragments or [("", "")]
-
-    kb = KeyBindings()
-
-    @kb.add("enter")
-    def _submit(event) -> None:
-        submit_prompt()
-
-    @kb.add("c-c")
-    @kb.add("c-d")
-    def _exit(event) -> None:
-        request_exit()
-
-    app = Application(
-        layout=Layout(
-            HSplit(
-                [
-                    transcript,
-                    ConditionalContainer(
-                        Window(
-                            height=Dimension(min=1, max=3),
-                            content=FormattedTextControl(get_queue_fragments),
-                            style="class:queue",
-                        ),
-                        filter=Condition(lambda: bool(pending_prompts)),
-                    ),
-                    Window(height=1, content=FormattedTextControl(get_status_fragments)),
-                    input_field,
-                ]
-            ),
-            focused_element=input_field,
-        ),
-        key_bindings=kb,
-        full_screen=False,
-        mouse_support=False,
-        refresh_interval=0.1,
-        style=Style.from_dict(
-            {
-                "transcript": "fg:#d8dee9 bg:#2b303b",
-                "input": "fg:#eceff4 bg:#2b303b",
-                "queue": "bg:#3b4252",
-                "queue.label": "fg:#2e3440 bg:#ebcb8b bold",
-                "queue.text": "fg:#eceff4 bg:#3b4252",
-                "queue.more": "fg:#88c0d0 bg:#3b4252 italic",
-                "status.busy": "fg:#eceff4 bg:#4c566a bold",
-                "status.queued": "fg:#2e3440 bg:#ebcb8b bold",
-                "status.idle": "fg:#2e3440 bg:#a3be8c bold",
-            }
-        ),
-    )
+            queued = f" | {pending_count} queued" if pending_count else ""
+            return [("class:bottom-toolbar", f" {frame} {current_status}{queued} ")]
+        if pending_count:
+            return [("class:bottom-toolbar", f" Ready | {pending_count} queued ")]
+        return [("class:bottom-toolbar", f" {current_status} ")]
 
     print("pi interactive mode. Type `exit` or `quit` to leave.\n")
-    return app.run()
+    while True:
+        with state_lock:
+            if shutdown_requested and worker is None and not pending_prompts:
+                return 0
+        if shutdown_requested:
+            time.sleep(0.05)
+            continue
+        try:
+            prompt = prompt_session.prompt(
+                ">>> ",
+                bottom_toolbar=get_bottom_toolbar,
+                refresh_interval=0.1,
+            )
+        except (EOFError, KeyboardInterrupt):
+            request_exit()
+            continue
+        prompt = prompt.strip()
+        if not prompt:
+            continue
+        if prompt.lower() in {"exit", "quit"}:
+            request_exit()
+            continue
+        with state_lock:
+            idle = worker is None and not pending_prompts
+            if not idle:
+                pending_prompts.append(prompt)
+                queued_position = len(pending_prompts)
+            else:
+                queued_position = 0
+        if idle:
+            start_turn(prompt)
+            continue
+        print_transcript_line(f"queued {queued_position}: {prompt}")
+        invalidate_prompt()
 
 
 def run_cli(
