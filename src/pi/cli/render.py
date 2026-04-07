@@ -100,10 +100,17 @@ def print_error(console: Console, message: str) -> None:
     console.print(f"Error: {message}")
 
 
-def print_scrollback_agent(console: Console, output: str) -> None:
+def print_scrollback_divider(console: Console, label: str, *, style: str) -> None:
     if console.is_terminal:
         console.print()
-        console.print("[bold green]pi[/bold green]")
+        console.rule(f"[{style}]{label}[/{style}]", style=style)
+        return
+    console.print(f"\n--- {label} ---")
+
+
+def print_scrollback_agent(console: Console, output: str) -> None:
+    print_scrollback_divider(console, "pi", style="green")
+    if console.is_terminal:
         for line in output.rstrip().splitlines() or ["(empty)"]:
             console.print(line)
         return
@@ -121,6 +128,7 @@ def print_scrollback_tool(console: Console, text: str, *, failed: bool = False) 
 
 
 def print_scrollback_queue(console: Console, index: int, prompt: str) -> None:
+    print_scrollback_divider(console, "queued", style="yellow")
     if console.is_terminal:
         console.print(f"[bold yellow]queued {index}[/bold yellow] {prompt}")
         return
@@ -128,6 +136,7 @@ def print_scrollback_queue(console: Console, index: int, prompt: str) -> None:
 
 
 def print_scrollback_error(console: Console, message: str) -> None:
+    print_scrollback_divider(console, "error", style="red")
     if console.is_terminal:
         console.print(f"[bold red]error[/bold red] {message}")
         return
