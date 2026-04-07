@@ -326,7 +326,7 @@ def run_prompt_toolkit_cli(
     app: Application[int]
 
     transcript = TextArea(
-        text="pi interactive mode. Type `exit` or `quit` to leave.\n",
+        text="",
         read_only=False,
         focusable=False,
         scrollbar=True,
@@ -503,6 +503,7 @@ def run_prompt_toolkit_cli(
         ),
     )
 
+    print("pi interactive mode. Type `exit` or `quit` to leave.\n")
     return app.run()
 
 
