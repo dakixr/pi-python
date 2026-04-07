@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Coroutine
 from contextlib import nullcontext
+import asyncio
 import inspect
 import os
 from dataclasses import dataclass
@@ -9,7 +11,7 @@ import sys
 from queue import Empty, Queue
 from threading import Thread
 import time
-from typing import Annotated, Protocol
+from typing import Annotated, Protocol, cast
 
 import typer
 
@@ -169,10 +171,24 @@ def run_interactive_cli(
     patch_context = nullcontext()
     if use_prompt_toolkit:
         from prompt_toolkit import PromptSession
-        from prompt_toolkit.patch_stdout import patch_stdout
+        from prompt_toolkit.application.run_in_terminal import run_in_terminal
 
         prompt_session = PromptSession()
-        patch_context = patch_stdout()
+
+        def terminal_writer(callback) -> None:
+            app = prompt_session.app
+            loop = app.loop
+            if loop is None:
+                callback()
+                return
+            coroutine = cast(Coroutine[object, object, None], run_in_terminal(callback))
+            future = asyncio.run_coroutine_threadsafe(coroutine, loop)
+            future.result()
+
+        renderer.attach_prompt_renderer(
+            terminal_writer=terminal_writer,
+            invalidate_prompt=prompt_session.app.invalidate,
+        )
 
     with patch_context:
         Thread(target=read_input, daemon=True).start()

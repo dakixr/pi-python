@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from threading import Lock
 from typing import Protocol, TextIO, cast
 
@@ -190,17 +191,35 @@ class InteractiveRenderer:
         self._queue_count = 0
         self._turn_active = False
         self._spinner_index = 0
+        self._terminal_writer: Callable[[Callable[[], None]], None] | None = None
+        self._invalidate_prompt: Callable[[], None] | None = None
+
+    def attach_prompt_renderer(
+        self,
+        *,
+        terminal_writer: Callable[[Callable[[], None]], None],
+        invalidate_prompt: Callable[[], None],
+    ) -> None:
+        with self._lock:
+            self._terminal_writer = terminal_writer
+            self._invalidate_prompt = invalidate_prompt
 
     def __enter__(self) -> "InteractiveRenderer":
         with self._lock:
             self._turn_active = True
             self._status_message = "Thinking"
+            invalidate_prompt = self._invalidate_prompt
+        if invalidate_prompt is not None:
+            invalidate_prompt()
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
         with self._lock:
             self._turn_active = False
             self._status_message = "Ready"
+            invalidate_prompt = self._invalidate_prompt
+        if invalidate_prompt is not None:
+            invalidate_prompt()
         return None
 
     def handle_event(self, event: str, payload: dict[str, object]) -> None:
@@ -235,6 +254,9 @@ class InteractiveRenderer:
     def set_queue_count(self, count: int) -> None:
         with self._lock:
             self._queue_count = count
+            invalidate_prompt = self._invalidate_prompt
+        if invalidate_prompt is not None:
+            invalidate_prompt()
 
     def toolbar_text(self) -> str:
         with self._lock:
@@ -259,6 +281,9 @@ class InteractiveRenderer:
     def _set_status(self, message: str) -> None:
         with self._lock:
             self._status_message = message
+            invalidate_prompt = self._invalidate_prompt
+        if invalidate_prompt is not None:
+            invalidate_prompt()
 
     def _print_block(self, label: str, text: str, *, style: str) -> None:
         lines = text.rstrip().splitlines() or ["(empty)"]
@@ -268,4 +293,12 @@ class InteractiveRenderer:
             self._console.print(f"{padding}{line}")
 
     def _print_labeled_line(self, label: str, text: str, *, style: str) -> None:
-        self._console.print(f"[bold {style}]{label:>5}[/bold {style}] {text}")
+        def emit() -> None:
+            self._console.print(f"[bold {style}]{label:>5}[/bold {style}] {text}")
+
+        with self._lock:
+            terminal_writer = self._terminal_writer
+        if terminal_writer is not None:
+            terminal_writer(emit)
+            return
+        emit()
